@@ -90,13 +90,13 @@ def dense_model(dense_config):
 class TestRotaryEmbedding:
     def test_output_shapes(self):
         rope = RotaryEmbedding(dim=32, max_seq_len=128)
-        cos, sin = rope(10)
+        cos, sin = rope(torch.arange(10))
         assert cos.shape == (10, 16)
         assert sin.shape == (10, 16)
 
     def test_apply_rotary(self):
         rope = RotaryEmbedding(dim=32)
-        cos, sin = rope(8)
+        cos, sin = rope(torch.arange(8))
         q = torch.randn(8, 4, 32)
         k = torch.randn(8, 2, 32)
         q_rot = apply_rotary(q, cos, sin)
