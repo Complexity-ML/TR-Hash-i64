@@ -102,8 +102,4 @@ class ComplexityDeepConfig:
             config.use_token_routed_mlp = False
             config.num_experts = 1
 
-        # Framework-trained models (have mlp_type field) use base mu for error;
-        # complexity-deep native models (no mlp_type) use contextual mu.
-        if "mlp_type" in data:
-
         return config
