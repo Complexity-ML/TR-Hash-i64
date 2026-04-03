@@ -621,6 +621,10 @@ class ComplexityDeepModel(nn.Module):
             lambda idx: ComplexityDecoderLayer(config),
         )
 
+        # Learnable mu_init for layer 0 (mu-guidance starting signal)
+        if getattr(config, 'use_mu_guidance', False):
+            self.mu_init = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
+
         # Final norm + lm_head only on last PP stage
         if is_last_pp_rank():
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -660,7 +664,7 @@ class ComplexityDeepModel(nn.Module):
 
         if is_first_pp_rank():
             hidden = self.embed_tokens(token_ids.long())
-            mu_prev = None
+            mu_prev = self.mu_init.expand(hidden.shape[0], -1, -1).squeeze(1) if hasattr(self, 'mu_init') else None
         else:
             raise RuntimeError("decode_step with pipeline parallelism not yet supported")
 
@@ -698,7 +702,7 @@ class ComplexityDeepModel(nn.Module):
 
         if is_first_pp_rank():
             hidden = self.embed_tokens(token_ids.long())
-            mu_prev = None
+            mu_prev = self.mu_init.expand(hidden.shape[0], hidden.shape[1], -1) if hasattr(self, 'mu_init') else None
         else:
             assert intermediate_tensors is not None
             hidden = intermediate_tensors["hidden_states"]
