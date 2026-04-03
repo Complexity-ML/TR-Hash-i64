@@ -37,142 +37,35 @@ from vllm_i64.parallel.tensor_parallel import (
 
 
 # =========================================================================
-# INL Dynamics (Complexity Deep specific)
+# Mu Projection (replaces PiD dynamics — lightweight mu guidance)
 # =========================================================================
 
-class INLDynamics(nn.Module):
+class MuProjection(nn.Module):
     """
-    INL Dynamics — PID-like control with velocity tracking.
+    Mu Projection — lightweight mu guidance without PiD dynamics.
 
-        mu(h) = mu_base + mu_proj(h)
-        error = h - mu(h)
-        v_next = alpha * v - beta * error
-        h_next = h + dt * gate * v_next
+    mu_contextual = clamp(mu + mu_proj(h))
 
-    alpha, beta, gate learned via controller MLP, clamped via sigmoid.
-
-    Supports two modes:
-      - Float (training / unquantized inference): standard F.silu, sigmoid, softplus
-      - INT8 (quantized inference): INT8 controller matmuls + LUT activations
+    Matches complexity-framework MuProjection.
     """
 
-    def __init__(self, hidden_size: int, controller_hidden: int = 64, dt: float = 0.1,
-                 use_contextual_error: bool = True):
+    def __init__(self, hidden_size: int, mu_min: float = -2.0, mu_max: float = 2.0):
         super().__init__()
         self.hidden_size = hidden_size
-        self.dt = dt
-        self.use_contextual_error = use_contextual_error
+        self.mu_min = mu_min
+        self.mu_max = mu_max
 
-        self.mu = nn.Parameter(torch.zeros(hidden_size))
+        self.mu = nn.Parameter(torch.ones(hidden_size))
         self.mu_proj = nn.Linear(hidden_size, hidden_size, bias=False)
         nn.init.zeros_(self.mu_proj.weight)
-
-        self.controller_in = nn.Linear(hidden_size * 2, controller_hidden)
-        self.controller_out = nn.Linear(controller_hidden, hidden_size * 3)
-
-        with torch.no_grad():
-            bias = self.controller_out.bias
-            bias[:hidden_size].fill_(2.2)
-            bias[hidden_size:hidden_size*2].fill_(-2.2)
-            bias[hidden_size*2:].fill_(0.0)
-            self.controller_out.weight.normal_(0, 0.01)
 
     def forward(
         self, h: torch.Tensor, v: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if v is None:
-            v = torch.zeros_like(h)
+        mu_contextual = torch.clamp(self.mu + self.mu_proj(h), self.mu_min, self.mu_max)
+        # Return (h_unchanged, velocity=None, mu_contextual) for compat
+        return h, v, mu_contextual
 
-        # INT8 path: quantized controller + LUT activations
-        if hasattr(self, 'ctrl_in_int8'):
-            return self._forward_int8(h, v)
-
-        # Cast to weight dtype — h may be float32 from INT8 linear output
-        w_dtype = self.controller_in.weight.dtype
-        if h.dtype != w_dtype:
-            h = h.to(w_dtype)
-            v = v.to(w_dtype)
-
-        hv = torch.cat([h, v], dim=-1)
-        ctrl = F.silu(self.controller_in(hv))
-        ctrl_out = self.controller_out(ctrl)
-
-        alpha_raw, beta_raw, gate_raw = torch.split(ctrl_out, self.hidden_size, dim=-1)
-        alpha = torch.sigmoid(alpha_raw)
-        beta = torch.clamp(F.softplus(beta_raw), max=2.0)
-        gate = torch.sigmoid(gate_raw)
-
-        mu_contextual = self.mu + self.mu_proj(h)
-
-        if self.use_contextual_error:
-            # complexity-deep (1.5B+): error from contextual mu
-            error = h - mu_contextual
-        else:
-            # complexity-framework (tiny/ablation): error from clamped base mu
-            mu_clamped = torch.clamp(self.mu, 0.0, 2.0)
-            error = h - mu_clamped
-            mu_contextual = mu_clamped + self.mu_proj(h)
-
-        v_next = alpha * v - beta * error
-        v_next = torch.clamp(v_next, min=-10.0, max=10.0)
-        h_next = h + self.dt * gate * v_next
-
-        return h_next, v_next, mu_contextual
-
-    def _forward_int8(
-        self, h: torch.Tensor, v: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """INT8 controller + LUT activations (zero-FLOP sigmoid/softplus/silu)."""
-        from vllm_i64.core.quantization import int8_linear_native
-        from vllm_i64.layers.integer_activations import (
-            _Q7, silu_integer, sigmoid_integer, softplus_integer,
-        )
-
-        hv = torch.cat([h, v], dim=-1)
-
-        # Controller in: INT8 matmul + LUT SiLU
-        ctrl = int8_linear_native(hv, self.ctrl_in_int8, self.ctrl_in_scale,
-                                  self.ctrl_in_bias)
-        ctrl_q7 = (ctrl.float() * _Q7).round().to(torch.int32)
-        ctrl = silu_integer(ctrl_q7).float() / _Q7
-
-        # Controller out: INT8 matmul
-        ctrl_out = int8_linear_native(ctrl, self.ctrl_out_int8, self.ctrl_out_scale,
-                                      self.ctrl_out_bias)
-
-        alpha_raw, beta_raw, gate_raw = torch.split(ctrl_out, self.hidden_size, dim=-1)
-
-        # LUT activations for alpha (sigmoid), beta (softplus), gate (sigmoid)
-        alpha_q7 = (alpha_raw.float() * _Q7).round().to(torch.int32)
-        alpha = sigmoid_integer(alpha_q7).float() / _Q7
-
-        beta_q7 = (beta_raw.float() * _Q7).round().to(torch.int32)
-        beta = softplus_integer(beta_q7).float() / _Q7
-        beta = beta.clamp(max=2.0)
-
-        gate_q7 = (gate_raw.float() * _Q7).round().to(torch.int32)
-        gate = sigmoid_integer(gate_q7).float() / _Q7
-
-        if hasattr(self, 'mu_proj_int8'):
-            mu_contextual = self.mu + int8_linear_native(h, self.mu_proj_int8, self.mu_proj_scale)
-        else:
-            mu_contextual = self.mu + self.mu_proj(h)
-
-        if self.use_contextual_error:
-            error = h - mu_contextual
-        else:
-            mu_clamped = torch.clamp(self.mu, 0.0, 2.0)
-            error = h - mu_clamped
-            if hasattr(self, 'mu_proj_int8'):
-                mu_contextual = mu_clamped + int8_linear_native(h, self.mu_proj_int8, self.mu_proj_scale)
-            else:
-                mu_contextual = mu_clamped + self.mu_proj(h)
-
-        v_next = alpha * v - beta * error
-        v_next = torch.clamp(v_next, min=-10.0, max=10.0)
-        h_next = h + self.dt * gate * v_next
-
-        return h_next, v_next, mu_contextual
 
 
 # =========================================================================
@@ -606,22 +499,16 @@ class ComplexityDecoderLayer(nn.Module):
 
     def __init__(self, config: ComplexityDeepConfig):
         super().__init__()
-        self.use_dynamics = (
-            getattr(config, 'use_inl_dynamics', True)
-            and config.num_experts > 1
-            and not getattr(config, 'disable_pid_scaler', False)
-        )
+        self.use_dynamics = False  # PiD removed — mu_guidance handles inter-layer communication
         self.disable_mu_guidance = getattr(config, 'disable_mu_guidance', False)
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.self_attn = MuGuidedAttention(config)
 
-        if self.use_dynamics:
-            self.dynamics = INLDynamics(
-                hidden_size=config.hidden_size,
-                controller_hidden=config.dynamics_controller_hidden,
-                dt=config.dynamics_dt,
-                use_contextual_error=config.dynamics_use_contextual_error,
-            )
+        # Mu-Guidance (replaces PiD dynamics)
+        if not self.disable_mu_guidance and getattr(config, 'use_mu_guidance', False):
+            self.dynamics = MuProjection(config.hidden_size)
+        else:
+            self.dynamics = None
 
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         if config.num_experts > 1 and config.use_token_routed_mlp:
@@ -653,17 +540,18 @@ class ComplexityDecoderLayer(nn.Module):
             x_preq=x_preq,
         )
 
-        if self.use_dynamics:
-            hidden, velocity, mu_current = self.dynamics(hidden, velocity)
-        else:
-            mu_current = None
         hidden = residual + hidden
 
+        # MLP
         residual = hidden
         norm_out = self.post_attention_layernorm(hidden)
-        x_preq = self.post_attention_layernorm._try_fused_quant(hidden) if hasattr(self.mlp, 'gate_up_int8') or hasattr(self.mlp, 'gate_int8') else None
-        hidden = self.mlp(norm_out, token_ids=token_ids, mu=mu_current, x_preq=x_preq)
+        hidden = self.mlp(norm_out, token_ids=token_ids)
         hidden = residual + hidden
+
+        # Mu-Guidance after MLP
+        mu_current = None
+        if self.dynamics is not None:
+            _, _, mu_current = self.dynamics(hidden)
 
         return hidden, velocity, mu_current
 
@@ -691,17 +579,18 @@ class ComplexityDecoderLayer(nn.Module):
             x_preq=x_preq,
         )
 
-        if self.use_dynamics:
-            hidden, velocity, mu_current = self.dynamics(hidden, velocity)
-        else:
-            mu_current = None
         hidden = residual + hidden
 
+        # MLP
         residual = hidden
         norm_out = self.post_attention_layernorm(hidden)
-        x_preq = self.post_attention_layernorm._try_fused_quant(hidden) if hasattr(self.mlp, 'gate_up_int8') or hasattr(self.mlp, 'gate_int8') else None
-        hidden = self.mlp(norm_out, token_ids=token_ids, mu=mu_current, x_preq=x_preq)
+        hidden = self.mlp(norm_out, token_ids=token_ids)
         hidden = residual + hidden
+
+        # Mu-Guidance after MLP
+        mu_current = None
+        if self.dynamics is not None:
+            _, _, mu_current = self.dynamics(hidden)
 
         return hidden, velocity, mu_current
 
