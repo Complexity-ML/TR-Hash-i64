@@ -415,16 +415,29 @@ class AdminMixin:
         return web.json_response(snapshot)
 
     async def handle_expert_stats(self, request: web.Request) -> web.Response:
-        """GET /v1/experts"""
+        """GET /v1/experts — live expert distribution for currently running requests only."""
         engine = self.sync_engine
         num_experts = getattr(engine, "num_experts", 0)
         if num_experts <= 1:
             return web.json_response({"error": "Not a MoE model (num_experts <= 1)"}, status=400)
+
+        # Use the real token_to_expert mapping from the model
+        token_to_expert = None
+        if engine.model is not None:
+            for module in engine.model.modules():
+                if hasattr(module, 'token_to_expert'):
+                    token_to_expert = module.token_to_expert
+                    break
+
         expert_counts = [0] * num_experts
         total_tokens = 0
-        for req in list(engine.scheduler.running) + list(engine.scheduler.finished):
+        for req in list(engine.scheduler.running):
             for tid in req.output_token_ids:
-                expert_counts[int(tid) % num_experts] += 1
+                if token_to_expert is not None:
+                    eid = token_to_expert[int(tid) % len(token_to_expert)].item()
+                else:
+                    eid = int(tid) % num_experts
+                expert_counts[eid] += 1
                 total_tokens += 1
         if total_tokens > 0:
             distribution = [round(c / total_tokens, 4) for c in expert_counts]
