@@ -4,7 +4,7 @@ vllm-i64 :: Complexity Deep Config
 Config specific to Complexity Deep / Pacific-Prime models.
 Mirrors checkpoints/*/config.json.
 
-INL - 2025
+Complexity-ML - 2026
 """
 
 import json
@@ -23,13 +23,13 @@ class ComplexityDeepConfig:
     architecture: str = "DeepForCausalLM"
     version: str = "0.13.0"
 
-    # Dimensions
+    # Dimensions (defaults match 384M Token-Routed model)
     vocab_size: int = 32000
-    hidden_size: int = 2048
-    intermediate_size: int = 5632
-    num_hidden_layers: int = 24
+    hidden_size: int = 1024
+    intermediate_size: int = 3200
+    num_hidden_layers: int = 20
     num_attention_heads: int = 16
-    num_key_value_heads: int = 8          # GQA
+    num_key_value_heads: int = 4          # GQA
 
     # Positions
     max_position_embeddings: int = 2048
@@ -52,6 +52,8 @@ class ComplexityDeepConfig:
     # Token-Routed MLP (i64)
     use_token_routed_mlp: bool = True
     num_experts: int = 4
+    shared_expert: bool = True
+    shared_intermediate_size: Optional[int] = None  # None = expert_intermediate_size
 
     # Attention features
     use_qk_norm: bool = True

@@ -42,6 +42,16 @@ result = engine.generate(prompt_token_ids=[1, 2, 3, 4, 5], max_new_tokens=100)
 print(result.output_tokens)
 ```
 
+## Supported Models
+
+| Model | Params | Active/token | Experts | Throughput |
+|-------|--------|-------------|---------|------------|
+| Pacific-I64 187M | 187M | ~105M | 4 | 8,078 tok/s |
+| Pacific-I64 384M | 383.5M | ~105M | 4 | 4,900 tok/s |
+| Dense baseline | any | all | 1 | — |
+
+*Throughput measured on RTX PRO 6000 96GB, vLLM 0.18, 100 requests @ 10 RPS, CUDA graphs enabled.*
+
 ### Serve
 
 ```bash
@@ -155,4 +165,4 @@ pytest tests/ -v
 
 ## License
 
-Apache 2.0 — INL / Complexity-ML, 2025
+Apache 2.0 — Complexity-ML, 2026
