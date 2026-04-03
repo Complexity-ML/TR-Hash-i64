@@ -1,8 +1,8 @@
 """
 Complexity Deep Model for vllm-i64.
 
-Rewritten to match the complexity-framework forward pass exactly.
-Supports both Token-Routed MoE and Dense SwiGLU models.
+Uses vllm-i64 attention backends (naive_varlen, paged KV cache).
+Weights loaded from complexity-framework checkpoint format.
 
 Complexity-ML — 2026
 """
@@ -14,6 +14,10 @@ import torch.nn.functional as F
 from typing import Optional, Tuple, List
 
 from vllm_i64.layers.token_routed_mlp import TokenRoutedMLP
+from vllm_i64.layers.attention import (
+    is_flash_attn_available, flash_prefill_attention,
+    naive_varlen_attention, naive_cached_attention,
+)
 
 
 # =========================================================================
@@ -25,26 +29,21 @@ class RotaryEmbedding(nn.Module):
         super().__init__()
         inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer("inv_freq", inv_freq)
-        self.max_seq_len = max_seq_len
 
-    def forward(self, seq_len):
-        t = torch.arange(seq_len, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
-        freqs = torch.outer(t, self.inv_freq)
+    def forward(self, positions):
+        """positions: [N] integer tensor."""
+        freqs = torch.outer(positions.float(), self.inv_freq.to(positions.device))
         cos = freqs.cos()
         sin = freqs.sin()
         return cos, sin
 
 
-def apply_rotary_pos_emb(q, k, cos, sin):
-    """Apply RoPE. q,k: [batch, heads, seq, head_dim]."""
-    cos = cos.unsqueeze(0).unsqueeze(0)  # [1, 1, seq, dim/2]
-    sin = sin.unsqueeze(0).unsqueeze(0)
-
-    def rotate(x, cos, sin):
-        x1, x2 = x.chunk(2, dim=-1)
-        return torch.cat([x1 * cos - x2 * sin, x2 * cos + x1 * sin], dim=-1)
-
-    return rotate(q, cos, sin), rotate(k, cos, sin)
+def apply_rotary(x, cos, sin):
+    """x: [N, heads, head_dim], cos/sin: [N, head_dim/2]."""
+    cos = cos.unsqueeze(1)  # [N, 1, dim/2]
+    sin = sin.unsqueeze(1)
+    x1, x2 = x.chunk(2, dim=-1)
+    return torch.cat([x1 * cos - x2 * sin, x2 * cos + x1 * sin], dim=-1)
 
 
 # =========================================================================
@@ -52,7 +51,6 @@ def apply_rotary_pos_emb(q, k, cos, sin):
 # =========================================================================
 
 class MuGuidance(nn.Module):
-    """Mu-Guidance — matches framework MuProjection."""
     def __init__(self, hidden_size):
         super().__init__()
         self.mu = nn.Parameter(torch.ones(hidden_size))
@@ -60,11 +58,12 @@ class MuGuidance(nn.Module):
         nn.init.zeros_(self.mu_proj.weight)
 
     def forward(self, h):
-        return torch.clamp(self.mu + self.mu_proj(h), -2.0, 2.0)
+        mu_clamped = torch.clamp(self.mu, 0.0, 2.0)
+        return mu_clamped + self.mu_proj(h)
 
 
 # =========================================================================
-# GQA Attention — matches framework gqa.py
+# Attention — uses vllm-i64 attention backends
 # =========================================================================
 
 class Attention(nn.Module):
@@ -90,65 +89,97 @@ class Attention(nn.Module):
             self.q_norm = nn.RMSNorm(self.head_dim, eps=1e-6)
             self.k_norm = nn.RMSNorm(self.head_dim, eps=1e-6)
 
-        self.rotary_emb = RotaryEmbedding(
+        self.rope = RotaryEmbedding(
             self.head_dim,
             max_seq_len=getattr(config, 'max_position_embeddings', 4096),
             theta=getattr(config, 'rope_theta', 10000.0),
         )
 
-    def forward(self, hidden_states, attention_mask=None, past_key_value=None,
-                use_cache=False, mu_prev=None, **kwargs):
-        batch_size, seq_len, _ = hidden_states.shape
+    def forward(self, hidden, positions, mu_prev=None,
+                kv_cache=None, layer_idx=0,
+                seq_ids=None, tokens_per_seq=None, **kwargs):
+        """
+        Args:
+            hidden: [N, hidden_size] (flattened tokens)
+            positions: [N] integer positions
+            mu_prev: [N, hidden_size] or None
+            kv_cache: PagedKVCache or None
+            tokens_per_seq: [num_seqs] token counts
+        """
+        bsz = hidden.shape[0]
 
-        q = self.q_proj(hidden_states)
-        k = self.k_proj(hidden_states)
-        v = self.v_proj(hidden_states)
+        q = self.q_proj(hidden)
+        k = self.k_proj(hidden)
+        v = self.v_proj(hidden)
 
         if mu_prev is not None:
             q = q + self.mu_to_q(mu_prev)
             k = k + self.mu_to_k(mu_prev)
             v = v + self.mu_to_v(mu_prev)
 
-        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
-        v = v.view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        # Reshape: [N, heads, head_dim]
+        q = q.view(bsz, self.num_heads, self.head_dim)
+        k = k.view(bsz, self.num_kv_heads, self.head_dim)
+        v = v.view(bsz, self.num_kv_heads, self.head_dim)
 
         if self.use_qk_norm:
             q = self.q_norm(q)
             k = self.k_norm(k)
 
-        kv_seq_len = seq_len
-        if past_key_value is not None:
-            kv_seq_len += past_key_value[0].shape[2]
+        # RoPE
+        cos, sin = self.rope(positions)
+        q = apply_rotary(q, cos, sin)
+        k = apply_rotary(k, cos, sin)
 
-        cos, sin = self.rotary_emb(kv_seq_len)
-        cos = cos.to(q.device, dtype=q.dtype)
-        sin = sin.to(q.device, dtype=q.dtype)
+        # KV Cache path
+        if kv_cache is not None and seq_ids is not None and tokens_per_seq is not None:
+            return self._cached_attention(
+                q, k, v, kv_cache, layer_idx, seq_ids, tokens_per_seq, positions)
 
-        if past_key_value is not None:
-            cos = cos[kv_seq_len - seq_len:]
-            sin = sin[kv_seq_len - seq_len:]
+        # Standard prefill (no cache)
+        scale = 1.0 / math.sqrt(self.head_dim)
+        tps = tokens_per_seq if tokens_per_seq is not None else [bsz]
 
-        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+        if is_flash_attn_available() and q.is_cuda:
+            out = flash_prefill_attention(q, k, v, tps, softmax_scale=scale)
+        else:
+            out = naive_varlen_attention(q, k, v, tps, self.num_kv_groups, softmax_scale=scale)
 
-        if past_key_value is not None:
-            k = torch.cat([past_key_value[0], k], dim=2)
-            v = torch.cat([past_key_value[1], v], dim=2)
+        out = out.reshape(bsz, self.num_heads * self.head_dim)
+        return self.o_proj(out)
 
-        new_past_key_value = (k, v) if use_cache else None
+    def _cached_attention(self, q, k, v, kv_cache, layer_idx, seq_ids, tokens_per_seq, positions):
+        """Attention with paged KV cache."""
+        bsz = q.shape[0]
 
-        k = k.repeat_interleave(self.num_kv_groups, dim=1)
-        v = v.repeat_interleave(self.num_kv_groups, dim=1)
+        # Write new K/V to cache
+        for i, sid in enumerate(seq_ids):
+            pos = positions[i].item() if positions.dim() > 0 else 0
+            kv_cache.store(layer_idx, sid, pos, k[i:i+1], v[i:i+1])
 
-        attn_output = F.scaled_dot_product_attention(
-            q, k, v, is_causal=(past_key_value is None and seq_len > 1),
-        )
+        # Gather full K/V from cache per request
+        outputs = []
+        offset = 0
+        scale = 1.0 / math.sqrt(self.head_dim)
 
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.view(batch_size, seq_len, -1)
-        attn_output = self.o_proj(attn_output)
+        for i, sid in enumerate(seq_ids):
+            n = tokens_per_seq[i]
+            q_i = q[offset:offset + n]
 
-        return attn_output, new_past_key_value
+            k_full, v_full = kv_cache.gather(layer_idx, sid)
+
+            out_i = naive_cached_attention(
+                q_i, k_full, v_full,
+                self.num_kv_groups,
+                positions[offset:offset + n],
+                softmax_scale=scale,
+            )
+            outputs.append(out_i)
+            offset += n
+
+        out = torch.cat(outputs, dim=0)
+        out = out.reshape(bsz, self.num_heads * self.head_dim)
+        return self.o_proj(out)
 
 
 # =========================================================================
@@ -167,11 +198,10 @@ class DenseSwiGLUMLP(nn.Module):
 
 
 # =========================================================================
-# MoE MLP — wraps TokenRoutedMLP for [batch, seq, hidden] format
+# MoE MLP
 # =========================================================================
 
 class MoEMLP(nn.Module):
-    """Wraps TokenRoutedMLP to handle [batch, seq, hidden] input."""
     def __init__(self, config):
         super().__init__()
         self.tr_mlp = TokenRoutedMLP(
@@ -184,15 +214,11 @@ class MoEMLP(nn.Module):
         )
 
     def forward(self, x, token_ids=None, **kwargs):
-        B, S, H = x.shape
-        flat_x = x.view(-1, H)
-        flat_ids = token_ids.view(-1) if token_ids is not None else None
-        out = self.tr_mlp(flat_x, token_ids=flat_ids)
-        return out.view(B, S, H)
+        return self.tr_mlp(x, token_ids=token_ids)
 
 
 # =========================================================================
-# Decoder Layer — matches framework block.py
+# Decoder Layer
 # =========================================================================
 
 class ComplexityDecoderLayer(nn.Module):
@@ -211,34 +237,31 @@ class ComplexityDecoderLayer(nn.Module):
         if getattr(config, 'use_mu_guidance', False) and not getattr(config, 'disable_mu_guidance', False):
             self.mu_guidance = MuGuidance(config.hidden_size)
 
-    def forward(self, hidden_states, attention_mask=None, past_key_value=None,
-                use_cache=False, token_ids=None, mu_prev=None, **kwargs):
-        # Attention
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
-        hidden_states, new_kv = self.self_attn(
-            hidden_states, attention_mask=attention_mask,
-            past_key_value=past_key_value, use_cache=use_cache,
-            mu_prev=mu_prev,
+    def forward(self, hidden, positions, token_ids=None, mu_prev=None,
+                kv_cache=None, layer_idx=0, seq_ids=None, tokens_per_seq=None, **kwargs):
+        residual = hidden
+        hidden = self.input_layernorm(hidden)
+        hidden = self.self_attn(
+            hidden, positions, mu_prev=mu_prev,
+            kv_cache=kv_cache, layer_idx=layer_idx,
+            seq_ids=seq_ids, tokens_per_seq=tokens_per_seq,
         )
-        hidden_states = residual + hidden_states
+        hidden = residual + hidden
 
-        # MLP
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states, token_ids=token_ids)
-        hidden_states = residual + hidden_states
+        residual = hidden
+        hidden = self.post_attention_layernorm(hidden)
+        hidden = self.mlp(hidden, token_ids=token_ids)
+        hidden = residual + hidden
 
-        # Mu-Guidance after MLP
         mu_current = None
         if self.mu_guidance is not None:
-            mu_current = self.mu_guidance(hidden_states)
+            mu_current = self.mu_guidance(hidden)
 
-        return hidden_states, new_kv, mu_current
+        return hidden, mu_current
 
 
 # =========================================================================
-# Complexity Deep Model — matches framework builder.py
+# Complexity Deep Model
 # =========================================================================
 
 class ComplexityDeepModel(nn.Module):
@@ -250,64 +273,63 @@ class ComplexityDeepModel(nn.Module):
         self.norm = nn.RMSNorm(config.hidden_size, eps=getattr(config, 'rms_norm_eps', 1e-6))
         self.tie_word_embeddings = getattr(config, 'tie_word_embeddings', True)
 
-        # Mu init
         self._has_mu = getattr(config, 'use_mu_guidance', False)
         if self._has_mu and not getattr(config, 'disable_mu_guidance', False):
             self.mu_init = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
 
-    def forward(self, input_ids=None, positions=None, token_ids=None,
+    def forward(self, token_ids, positions=None,
                 kv_cache=None, seq_ids=None, tokens_per_seq=None, **kwargs):
         """
+        Engine-compatible forward.
+
         Args:
-            input_ids: [batch, seq_len] or [N] (flattened)
-            token_ids: alias for input_ids (used by I64Engine)
-            positions: not used (RoPE computed from KV cache length)
-            kv_cache: list of (k, v) per layer, or None
-            seq_ids: not used
-            tokens_per_seq: not used
+            token_ids: [N] flattened token IDs
+            positions: [N] integer positions
+            kv_cache: PagedKVCache or None
+            seq_ids: list of sequence IDs
+            tokens_per_seq: list of token counts per sequence
         """
-        if input_ids is None:
-            input_ids = token_ids
-        if input_ids.dim() == 1:
-            input_ids = input_ids.unsqueeze(0)
+        if token_ids.dim() == 2:
+            # Standalone mode: [batch, seq_len] -> flatten
+            batch_size, seq_len = token_ids.shape
+            token_ids = token_ids.view(-1)
+            if positions is None:
+                positions = torch.arange(seq_len, device=token_ids.device).repeat(batch_size)
+            if tokens_per_seq is None:
+                tokens_per_seq = [seq_len] * batch_size
+        elif positions is None:
+            positions = torch.arange(token_ids.shape[0], device=token_ids.device)
+            if tokens_per_seq is None:
+                tokens_per_seq = [token_ids.shape[0]]
 
-        batch_size, seq_len = input_ids.shape
-        hidden_states = self.embed_tokens(input_ids)
+        N = token_ids.shape[0]
+        hidden = self.embed_tokens(token_ids.long())
 
-        # Mu init
         mu_prev = None
         if self._has_mu and hasattr(self, 'mu_init'):
-            mu_prev = self.mu_init.expand(batch_size, seq_len, -1)
+            mu_prev = self.mu_init.view(1, -1).expand(N, -1)
 
-        new_kv_cache = []
         for i, layer in enumerate(self.layers):
-            past_kv = None
-            if kv_cache is not None and i < len(kv_cache):
-                past_kv = kv_cache[i]
-
-            hidden_states, new_kv, mu_current = layer(
-                hidden_states,
-                past_key_value=past_kv,
-                use_cache=True,
-                token_ids=input_ids,
+            hidden, mu_current = layer(
+                hidden, positions,
+                token_ids=token_ids,
                 mu_prev=mu_prev,
+                kv_cache=kv_cache,
+                layer_idx=i,
+                seq_ids=seq_ids,
+                tokens_per_seq=tokens_per_seq,
             )
-            new_kv_cache.append(new_kv)
             if mu_current is not None:
-                mu_prev = mu_current
+                mu_prev = torch.clamp(mu_current, -2.0, 2.0)
 
-        # Store KV cache for next call
-        self._kv_cache = new_kv_cache
+        hidden = self.norm(hidden)
 
-        hidden_states = self.norm(hidden_states)
-
-        # Logits
         if self.tie_word_embeddings:
-            logits = F.linear(hidden_states.float(), self.embed_tokens.weight.float())
+            logits = F.linear(hidden.float(), self.embed_tokens.weight.float())
         else:
-            logits = self.lm_head(hidden_states)
+            logits = self.lm_head(hidden)
 
-        return logits.squeeze(0) if logits.shape[0] == 1 else logits
+        return logits
 
     def num_parameters(self):
         return sum(p.numel() for p in self.parameters())
@@ -317,18 +339,16 @@ class ComplexityDeepModel(nn.Module):
         mapped = {}
         for k, v in state_dict.items():
             new_key = k
-            # MoE MLP: gate_proj_w -> mlp.tr_mlp.gate_proj_w
             for proj in ("gate_proj_w", "up_proj_w", "down_proj_w", "token_to_expert"):
                 if f"mlp.{proj}" in new_key and "tr_mlp" not in new_key:
                     new_key = new_key.replace(f"mlp.{proj}", f"mlp.tr_mlp.{proj}")
                     break
-            # Shared expert: shared_gate -> mlp.tr_mlp.shared_gate
             for proj in ("shared_gate", "shared_up", "shared_down"):
                 if f"mlp.{proj}" in new_key and "tr_mlp" not in new_key:
                     new_key = new_key.replace(f"mlp.{proj}", f"mlp.tr_mlp.{proj}")
                     break
-            # mu_guidance -> mu_guidance (same name, no change needed)
-            # rotary_emb -> rotary_emb (same name)
+            # rotary_emb -> rope
+            new_key = new_key.replace("self_attn.rotary_emb.", "self_attn.rope.")
             mapped[new_key] = v
 
         missing, unexpected = self.load_state_dict(mapped, strict=False)
