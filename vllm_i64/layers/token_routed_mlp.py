@@ -64,11 +64,14 @@ class TokenRoutedMLP(nn.Module):
         self.full_expert_inter = intermediate_size // num_experts
         self.expert_inter = self.full_expert_inter // tp.tp_size
 
-        # Expert weights (sharded on intermediate dim)
-        self.gate_up_proj = nn.Parameter(
-            torch.empty(num_experts, hidden_size, 2 * self.expert_inter)
+        # Expert weights — separate gate/up (matches framework checkpoint format)
+        self.gate_proj_w = nn.Parameter(
+            torch.empty(num_experts, hidden_size, self.expert_inter)
         )
-        self.down_proj = nn.Parameter(
+        self.up_proj_w = nn.Parameter(
+            torch.empty(num_experts, hidden_size, self.expert_inter)
+        )
+        self.down_proj_w = nn.Parameter(
             torch.empty(num_experts, self.expert_inter, hidden_size)
         )
 
@@ -86,8 +89,9 @@ class TokenRoutedMLP(nn.Module):
             torch.arange(vocab_size, dtype=torch.long) % num_experts,
         )
 
-        nn.init.kaiming_uniform_(self.gate_up_proj, a=5**0.5)
-        nn.init.kaiming_uniform_(self.down_proj, a=5**0.5)
+        nn.init.kaiming_uniform_(self.gate_proj_w, a=5**0.5)
+        nn.init.kaiming_uniform_(self.up_proj_w, a=5**0.5)
+        nn.init.kaiming_uniform_(self.down_proj_w, a=5**0.5)
 
     def route(self, token_ids: Optional[torch.Tensor], num_tokens: int, device: torch.device) -> torch.Tensor:
         """Pure i64 routing. Override in subclasses."""
@@ -97,25 +101,17 @@ class TokenRoutedMLP(nn.Module):
         return self.token_to_expert[token_ids_clamped]
 
     def expert_forward(self, x: torch.Tensor, expert_ids: torch.Tensor) -> torch.Tensor:
-        """Dispatch + SwiGLU + all_reduce (fused)."""
-        if hasattr(self, 'gate_up_int4'):
-            output = fused_token_routed_forward_int4(
-                x, self.gate_up_int4, self.gate_up_scale_int4, self.gate_up_zero,
-                self.down_int4, self.down_scale_int4, self.down_zero,
-                expert_ids, self.num_experts, self.expert_inter,
-            )
-        elif hasattr(self, 'gate_up_int8'):
-            output = fused_token_routed_forward_int8(
-                x, self.gate_up_int8, self.gate_up_scale,
-                self.down_int8, self.down_scale,
-                expert_ids, self.num_experts, self.expert_inter,
-            )
-        else:
-            output = fused_token_routed_forward(
-                x, self.gate_up_proj, self.down_proj,
-                expert_ids, self.num_experts, self.expert_inter,
-            )
-        # All-reduce across TP ranks (RowParallel equivalent)
+        """Sparse dispatch with loop — matches framework supplementary code."""
+        output = torch.zeros_like(x)
+        for e in range(self.num_experts):
+            mask = (expert_ids == e)
+            if not mask.any():
+                continue
+            x_e = x[mask]
+            gate_e = x_e @ self.gate_proj_w[e]
+            up_e = x_e @ self.up_proj_w[e]
+            inter_e = F.silu(gate_e) * up_e
+            output[mask] = (inter_e @ self.down_proj_w[e]).to(output.dtype)
         return all_reduce(output)
 
     def forward(self, x, token_ids=None, **kwargs):
@@ -131,9 +127,8 @@ class TokenRoutedMLP(nn.Module):
 
         return output
 
-    def load_full_weights(self, full_gate_up: torch.Tensor, full_down: torch.Tensor):
-        """Load from unsharded checkpoint, take our TP slice."""
-        from vllm_i64.parallel.tensor_parallel import shard_expert_weights
-        gu_shard, dn_shard = shard_expert_weights(full_gate_up, full_down)
-        self.gate_up_proj.data.copy_(gu_shard)
-        self.down_proj.data.copy_(dn_shard)
+    def load_full_weights(self, full_gate: torch.Tensor, full_up: torch.Tensor, full_down: torch.Tensor):
+        """Load from unsharded checkpoint."""
+        self.gate_proj_w.data.copy_(full_gate)
+        self.up_proj_w.data.copy_(full_up)
+        self.down_proj_w.data.copy_(full_down)
