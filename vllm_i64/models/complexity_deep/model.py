@@ -200,6 +200,8 @@ class MuGuidedTokenRoutedMLP(TokenRoutedMLP):
             intermediate_size=config.intermediate_size,
             num_experts=config.num_experts,
             vocab_size=config.vocab_size,
+            shared_expert=getattr(config, 'shared_expert', False),
+            shared_intermediate_size=getattr(config, 'shared_intermediate_size', None) or 0,
         )
         # Mu-guided routing bias (Complexity Deep specific)
         self.mu_router = nn.Linear(config.hidden_size, config.num_experts, bias=False)

@@ -3,19 +3,22 @@ vllm-i64 :: Token-Routed MLP (Generic)
 
 Pure i64 deterministic expert routing. Model-agnostic.
 Supports Tensor Parallelism: experts sharded on intermediate dim.
+Supports Shared Lexical Expert: dense SwiGLU applied to all tokens.
 
 Integer:
-  - Routing: token_id & (num_experts - 1) → expert_id  (replicated, all ranks)
+  - Routing: token_id → expert_id via Zipf-balanced mapping (replicated, all ranks)
   - Scatter/gather: argsort indices
 
 Float:
   - Expert SwiGLU compute only
+  - Shared expert SwiGLU (all tokens)
 
-INL - 2025
+Complexity-ML - 2026
 """
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Optional
 
 from vllm_i64.parallel.tensor_parallel import get_tp, all_reduce
@@ -28,14 +31,17 @@ from vllm_i64.kernels.fused_experts import (
 
 class TokenRoutedMLP(nn.Module):
     """
-    Generic token-routed MLP with TP support.
+    Generic token-routed MLP with TP support and Shared Lexical Expert.
 
     Routing (i64, replicated on all ranks):
-        expert_id = token_id % num_experts
+        expert_id = token_to_expert[token_id]  (Zipf-balanced or modulo)
 
     Expert compute (float, sharded across TP ranks):
         gate_up: (E, hidden, 2 * inter_per_tp) — ColumnParallel
         down:    (E, inter_per_tp, hidden)      — RowParallel + all_reduce
+
+    Shared expert (float, all tokens):
+        shared_gate/shared_up/shared_down — dense SwiGLU
     """
 
     def __init__(
@@ -44,6 +50,8 @@ class TokenRoutedMLP(nn.Module):
         intermediate_size: int,
         num_experts: int,
         vocab_size: int,
+        shared_expert: bool = False,
+        shared_intermediate_size: int = 0,
     ):
         super().__init__()
         tp = get_tp()
@@ -63,6 +71,14 @@ class TokenRoutedMLP(nn.Module):
         self.down_proj = nn.Parameter(
             torch.empty(num_experts, self.expert_inter, hidden_size)
         )
+
+        # Shared Lexical Expert: dense SwiGLU applied to all tokens
+        self.use_shared_expert = shared_expert
+        if shared_expert:
+            shared_size = shared_intermediate_size if shared_intermediate_size > 0 else self.full_expert_inter
+            self.shared_gate = nn.Linear(hidden_size, shared_size, bias=False)
+            self.shared_up = nn.Linear(hidden_size, shared_size, bias=False)
+            self.shared_down = nn.Linear(shared_size, hidden_size, bias=False)
 
         # i64 routing table (replicated — cheap)
         self.register_buffer(
@@ -104,7 +120,16 @@ class TokenRoutedMLP(nn.Module):
 
     def forward(self, x, token_ids=None, **kwargs):
         expert_ids = self.route(token_ids, x.shape[0], x.device)
-        return self.expert_forward(x, expert_ids)
+        output = self.expert_forward(x, expert_ids)
+
+        # Shared expert: dense SwiGLU applied to all tokens
+        if self.use_shared_expert:
+            shared_out = self.shared_down(
+                F.silu(self.shared_gate(x)) * self.shared_up(x)
+            ).to(output.dtype)
+            output = output + shared_out
+
+        return output
 
     def load_full_weights(self, full_gate_up: torch.Tensor, full_down: torch.Tensor):
         """Load from unsharded checkpoint, take our TP slice."""
