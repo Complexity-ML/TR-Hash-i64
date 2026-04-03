@@ -157,26 +157,28 @@ class Attention(nn.Module):
         """Attention with paged KV cache."""
         bsz = q.shape[0]
 
-        # Write new K/V to cache
-        for i, sid in enumerate(seq_ids):
-            pos = positions[i].item() if positions.dim() > 0 else 0
-            kv_cache.write_kv(layer_idx, sid, pos, k[i], v[i])
-
-        # Gather full K/V from cache per request
+        # Write new K/V to cache — each token at its own position
         outputs = []
         offset = 0
         scale = 1.0 / math.sqrt(self.head_dim)
 
         for i, sid in enumerate(seq_ids):
             n = tokens_per_seq[i]
-            q_i = q[offset:offset + n]
+            seq_positions = positions[offset:offset + n]
 
+            # Write all tokens for this sequence to cache
+            for j in range(n):
+                pos = seq_positions[j].item()
+                kv_cache.write_kv(layer_idx, sid, pos, k[offset + j], v[offset + j])
+
+            # Read full K/V history from cache
             k_full, v_full = kv_cache.read_kv(layer_idx, sid)
 
+            q_i = q[offset:offset + n]
             out_i = naive_cached_attention(
                 q_i, k_full, v_full,
                 self.num_kv_groups,
-                positions[offset:offset + n],
+                seq_positions,
                 softmax_scale=scale,
             )
             outputs.append(out_i)
