@@ -119,7 +119,9 @@ class I64Server(HelpersMixin, CompletionsMixin, AdminMixin, RAGMixin, AgentMixin
 
         # Token quality vector — pre-computed logit bias from tokenizer heuristics
         if tokenizer and engine is not None and hasattr(engine, 'sampler'):
-            engine.sampler.set_token_quality_vector(tokenizer.token_quality_vector)
+            tqv = getattr(tokenizer, 'token_quality_vector', None)
+            if tqv is not None:
+                engine.sampler.set_token_quality_vector(tqv)
 
         # Space suppression at step 0 (first-token quality fix)
         self._space_suppress_ids = None
