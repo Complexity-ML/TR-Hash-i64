@@ -176,6 +176,23 @@ class INLDynamics(nn.Module):
 
 
 # =========================================================================
+# Dense SwiGLU MLP (for num_experts == 1 / dense baseline)
+# =========================================================================
+
+class DenseSwiGLUMLP(nn.Module):
+    """Standard dense SwiGLU MLP for dense baseline models."""
+
+    def __init__(self, config: ComplexityDeepConfig):
+        super().__init__()
+        self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
+        self.up_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
+
+    def forward(self, x, token_ids=None, mu=None, x_preq=None, **kwargs):
+        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+
+
+# =========================================================================
 # Mu-Guided Token-Routed MLP (extends generic TokenRoutedMLP)
 # =========================================================================
 
@@ -607,7 +624,10 @@ class ComplexityDecoderLayer(nn.Module):
             )
 
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.mlp = MuGuidedTokenRoutedMLP(config)
+        if config.num_experts > 1 and config.use_token_routed_mlp:
+            self.mlp = MuGuidedTokenRoutedMLP(config)
+        else:
+            self.mlp = DenseSwiGLUMLP(config)
 
     def decode_step(
         self,
