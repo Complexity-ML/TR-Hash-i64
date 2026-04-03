@@ -60,25 +60,13 @@ class ComplexityDeepConfig:
     use_sdpa: bool = True
     sliding_window: Optional[int] = None
 
-    # INL Dynamics
-    dynamics_alpha: float = 0.9
-    dynamics_beta: float = 0.1
-    dynamics_gate: float = 0.5
-    dynamics_dt: float = 0.1
-    dynamics_controller_hidden: int = 64
 
     # Mu-Guidance
     use_mu_guidance: bool = False       # Enable mu projection between layers
 
     # Ablation flags (from training config)
     disable_mu_guidance: bool = False   # run3-no-mu: skip mu→Q/K/V and mu routing
-    disable_pid_scaler: bool = False    # run4-no-pid: skip INL dynamics entirely
 
-    # Dynamics variant: complexity-deep (1.5B+) vs complexity-framework (tiny/ablation)
-    # - contextual_error: 1.5B+ uses error=h-mu_contextual, tiny uses error=h-clamp(mu)
-    # - cascade_velocity: 1.5B+ cascades velocity layer→layer, tiny resets per layer
-    dynamics_use_contextual_error: bool = True   # default=True for 1.5B+ (complexity-deep)
-    dynamics_cascade_velocity: bool = True       # default=True for 1.5B+ (complexity-deep)
 
     @property
     def head_dim(self) -> int:
@@ -117,7 +105,5 @@ class ComplexityDeepConfig:
         # Framework-trained models (have mlp_type field) use base mu for error;
         # complexity-deep native models (no mlp_type) use contextual mu.
         if "mlp_type" in data:
-            config.dynamics_use_contextual_error = False
-            config.dynamics_cascade_velocity = False
 
         return config

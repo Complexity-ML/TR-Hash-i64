@@ -3,7 +3,7 @@ vllm-i64 :: Complexity Deep Model
 
 Specific implementation for the Complexity Deep architecture.
 Uses the GENERIC TokenRoutedMLP layer + adds:
-  - INL Dynamics (PID control, velocity tracking)
+  - Mu-Guidance (lightweight mu projection between layers)
   - Mu-Guided Attention (mu biases Q, K, V)
   - Mu-Guided Routing (mu overrides i64 base routing)
   - Mu Residual Highway (accumulated context across layers)
@@ -526,34 +526,28 @@ class ComplexityDecoderLayer(nn.Module):
         kv_cache,
         layer_idx: int,
         seq_ids_tensor: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Decode-only layer forward. CUDA-graph compatible (all tensor ops)."""
+    ) -> Tuple[torch.Tensor, None, Optional[torch.Tensor]]:
+        """Decode-only layer forward. CUDA-graph compatible."""
         residual = hidden
-
         norm_out = self.input_layernorm(hidden)
-        x_preq = self.input_layernorm._try_fused_quant(hidden) if hasattr(self.self_attn, 'qkv_int8') else None
         attn_mu = None if self.disable_mu_guidance else mu_prev
         hidden = self.self_attn.decode_step(
             norm_out, positions, mu_prev=attn_mu,
             kv_cache=kv_cache, layer_idx=layer_idx,
             seq_ids_tensor=seq_ids_tensor,
-            x_preq=x_preq,
         )
-
         hidden = residual + hidden
 
-        # MLP
         residual = hidden
         norm_out = self.post_attention_layernorm(hidden)
         hidden = self.mlp(norm_out, token_ids=token_ids)
         hidden = residual + hidden
 
-        # Mu-Guidance after MLP
         mu_current = None
         if self.dynamics is not None:
             _, _, mu_current = self.dynamics(hidden)
 
-        return hidden, velocity, mu_current
+        return hidden, None, mu_current
 
     def forward(
         self,
@@ -566,33 +560,27 @@ class ComplexityDecoderLayer(nn.Module):
         layer_idx: int = 0,
         seq_ids: Optional[List[int]] = None,
         tokens_per_seq: Optional[List[int]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, None, Optional[torch.Tensor]]:
         residual = hidden
-
         norm_out = self.input_layernorm(hidden)
-        x_preq = self.input_layernorm._try_fused_quant(hidden) if hasattr(self.self_attn, 'qkv_int8') else None
         attn_mu = None if self.disable_mu_guidance else mu_prev
         hidden = self.self_attn(
             norm_out, positions, mu_prev=attn_mu,
             kv_cache=kv_cache, layer_idx=layer_idx,
             seq_ids=seq_ids, tokens_per_seq=tokens_per_seq,
-            x_preq=x_preq,
         )
-
         hidden = residual + hidden
 
-        # MLP
         residual = hidden
         norm_out = self.post_attention_layernorm(hidden)
         hidden = self.mlp(norm_out, token_ids=token_ids)
         hidden = residual + hidden
 
-        # Mu-Guidance after MLP
         mu_current = None
         if self.dynamics is not None:
             _, _, mu_current = self.dynamics(hidden)
 
-        return hidden, velocity, mu_current
+        return hidden, None, mu_current
 
 
 # =========================================================================
@@ -667,52 +655,30 @@ class ComplexityDeepModel(nn.Module):
     ) -> torch.Tensor:
         """
         Decode-only forward pass. CUDA-graph compatible.
-
-        All operations are tensor-based (no Python loops, no .item()).
-        Used for GPU decode with captured CUDA graphs. Single PP stage only.
-
-        Args:
-            velocity_buf: [batch, hidden_size] persistent velocity state across tokens.
-                          If provided, used in-place (CUDA-graph safe). If None, zeros.
         """
         from vllm_i64.parallel.pipeline_parallel import is_first_pp_rank, is_last_pp_rank
 
         if is_first_pp_rank():
             hidden = self.embed_tokens(token_ids.long())
-            if self.config.dynamics_cascade_velocity:
-                velocity = velocity_buf if velocity_buf is not None else torch.zeros_like(hidden)
-            else:
-                velocity = None
             mu_prev = None
         else:
             raise RuntimeError("decode_step with pipeline parallelism not yet supported")
 
-        # Velocity behavior depends on training origin:
-        # - complexity-deep (1.5B+): cascade velocity layer→layer + persist via velocity_buf
-        # - complexity-framework (tiny): each layer starts from v=None (→ zeros)
         for layer_idx in range(self.start_layer, self.end_layer):
             layer = self.layers[layer_idx]
-            hidden, velocity, mu_current = layer.decode_step(
-                hidden, positions, velocity,
+            hidden, _, mu_current = layer.decode_step(
+                hidden, positions, None,
                 token_ids=token_ids,
                 mu_prev=mu_prev,
                 kv_cache=kv_cache,
                 layer_idx=layer_idx,
                 seq_ids_tensor=seq_ids_tensor,
             )
-            if not self.config.dynamics_cascade_velocity:
-                velocity = None
-
-            # Match original training exactly: mu_prev = mu_contextual, no clamp, no residual
             if mu_current is not None:
                 mu_prev = mu_current
 
         if not is_last_pp_rank():
             raise RuntimeError("decode_step with pipeline parallelism not yet supported")
-
-        # Persist velocity for next decode step (complexity-deep only)
-        if self.config.dynamics_cascade_velocity and velocity_buf is not None:
-            velocity_buf.copy_(velocity)
 
         hidden = self.norm(hidden)
         return self._compute_logits(hidden)
@@ -730,26 +696,18 @@ class ComplexityDeepModel(nn.Module):
         from vllm_i64.parallel.pipeline_parallel import is_first_pp_rank, is_last_pp_rank
         from vllm_i64.parallel.pp_utils import IntermediateTensors
 
-        # First stage: embed tokens
         if is_first_pp_rank():
             hidden = self.embed_tokens(token_ids.long())
-            velocity = torch.zeros_like(hidden) if self.config.dynamics_cascade_velocity else None
             mu_prev = None
         else:
-            # Receive from previous stage
             assert intermediate_tensors is not None
             hidden = intermediate_tensors["hidden_states"]
-            velocity = intermediate_tensors.get("velocity_states")
             mu_prev = intermediate_tensors.get("mu_prev")
 
-        # Velocity behavior depends on training origin:
-        # - complexity-deep (1.5B+): cascade velocity layer→layer (original training)
-        # - complexity-framework (tiny): each layer starts from v=None (→ zeros)
-        mu_residual = None
         for layer_idx in range(self.start_layer, self.end_layer):
             layer = self.layers[layer_idx]
-            hidden, velocity, mu_current = layer(
-                hidden, positions, velocity,
+            hidden, _, mu_current = layer(
+                hidden, positions, None,
                 token_ids=token_ids,
                 mu_prev=mu_prev,
                 kv_cache=kv_cache,
@@ -757,27 +715,15 @@ class ComplexityDeepModel(nn.Module):
                 seq_ids=seq_ids,
                 tokens_per_seq=tokens_per_seq,
             )
-            if not self.config.dynamics_cascade_velocity:
-                velocity = None
-
-            # Match original training: mu residual highway (complexity_deep/models/modeling.py)
             if mu_current is not None:
-                if mu_residual is None:
-                    mu_residual = mu_current.clone()
-                    mu_prev = mu_current + 0.1 * mu_residual
-                else:
-                    mu_residual = mu_residual + mu_current
-                    mu_prev = mu_current + 0.1 * mu_residual
+                mu_prev = mu_current
 
-        # Not last stage: pass tensors to next stage
         if not is_last_pp_rank():
             return IntermediateTensors({
                 "hidden_states": hidden,
-                "velocity_states": velocity,
                 "mu_prev": mu_prev,
             })
 
-        # Last stage: norm + logits
         hidden = self.norm(hidden)
         return self._compute_logits(hidden)
 
