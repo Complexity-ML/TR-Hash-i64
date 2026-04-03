@@ -8,11 +8,12 @@ from vllm_i64.models.complexity_deep.model import (
     ComplexityDecoderLayer,
     MuGuidedAttention,
     MuGuidedTokenRoutedMLP,
-    INLDynamics,
+    MuProjection,
+    DenseSwiGLUMLP,
 )
 
 __all__ = [
     "ComplexityDeepConfig",
     "ComplexityDeepModel", "ComplexityDecoderLayer",
-    "MuGuidedAttention", "MuGuidedTokenRoutedMLP", "INLDynamics",
+    "MuGuidedAttention", "MuGuidedTokenRoutedMLP", "MuProjection", "DenseSwiGLUMLP",
 ]
