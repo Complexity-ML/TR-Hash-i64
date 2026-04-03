@@ -42,29 +42,28 @@ from vllm_i64.parallel.tensor_parallel import (
 
 class MuProjection(nn.Module):
     """
-    Mu Projection — lightweight mu guidance without PiD dynamics.
+    Mu-Guidance — learnable equilibrium with contextual projection.
 
-    mu_contextual = clamp(mu + mu_proj(h))
-
-    Matches complexity-framework MuProjection.
+    Matches vllm-cuda_graph MuGuidance exactly:
+        mu_contextual = clamp(mu, 0, 2) + mu_proj(h)
     """
 
-    def __init__(self, hidden_size: int, mu_min: float = -2.0, mu_max: float = 2.0):
+    def __init__(self, hidden_size: int, mu_min: float = 0.0, mu_max: float = 2.0):
         super().__init__()
         self.hidden_size = hidden_size
         self.mu_min = mu_min
         self.mu_max = mu_max
 
-        self.mu = nn.Parameter(torch.ones(hidden_size))
+        self.mu = nn.Parameter(torch.full((hidden_size,), (mu_min + mu_max) / 2))
         self.mu_proj = nn.Linear(hidden_size, hidden_size, bias=False)
         nn.init.zeros_(self.mu_proj.weight)
 
     def forward(
         self, h: torch.Tensor, v: Optional[torch.Tensor] = None
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        mu_contextual = torch.clamp(self.mu + self.mu_proj(h), self.mu_min, self.mu_max)
-        # Return (h_unchanged, velocity=None, mu_contextual) for compat
-        return h, v, mu_contextual
+    ) -> Tuple[torch.Tensor, None, torch.Tensor]:
+        mu_clamped = torch.clamp(self.mu, self.mu_min, self.mu_max)
+        mu_contextual = mu_clamped + self.mu_proj(h)
+        return h, None, mu_contextual
 
 
 
@@ -682,7 +681,7 @@ class ComplexityDeepModel(nn.Module):
                 seq_ids_tensor=seq_ids_tensor,
             )
             if mu_current is not None:
-                mu_prev = mu_current
+                mu_prev = torch.clamp(mu_current, -2.0, 2.0)
 
         if not is_last_pp_rank():
             raise RuntimeError("decode_step with pipeline parallelism not yet supported")
@@ -727,7 +726,7 @@ class ComplexityDeepModel(nn.Module):
                 tokens_per_seq=tokens_per_seq,
             )
             if mu_current is not None:
-                mu_prev = mu_current
+                mu_prev = torch.clamp(mu_current, -2.0, 2.0)
 
         if not is_last_pp_rank():
             return IntermediateTensors({
