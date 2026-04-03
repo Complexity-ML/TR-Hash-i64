@@ -31,9 +31,9 @@ class TestComplexityDeepConfig:
     def test_defaults(self):
         config = ComplexityDeepConfig()
         assert config.vocab_size == 32000
-        assert config.hidden_size == 2048
+        assert config.hidden_size == 1024
         assert config.num_experts == 4
-        assert config.head_dim == 128  # 2048 / 16
+        assert config.head_dim == 64  # 1024 / 16
 
     def test_head_dim_property(self):
         config = ComplexityDeepConfig(hidden_size=512, num_attention_heads=8)
@@ -91,8 +91,8 @@ class TestGetModuleForParam:
             num_key_value_heads=2, intermediate_size=128, num_experts=2, vocab_size=32,
         )
         model = ComplexityDeepModel(config)
-        # q_proj is ColumnParallelLinear
-        module = _get_module_for_param(model, "layers.0.self_attn.q_proj.linear.weight")
+        # q_proj is nn.Linear
+        module = _get_module_for_param(model, "layers.0.self_attn.q_proj.weight")
         assert module is not None
 
     def test_returns_none_for_missing(self):

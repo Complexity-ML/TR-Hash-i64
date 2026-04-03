@@ -119,12 +119,12 @@ class TestModelWithTP:
         )
         model = ComplexityDeepModel(config)
 
-        # Attention uses ColumnParallel/RowParallel
+        # Attention uses nn.Linear (TP handled externally)
         attn = model.layers[0].self_attn
-        assert isinstance(attn.q_proj, ColumnParallelLinear)
-        assert isinstance(attn.k_proj, ColumnParallelLinear)
-        assert isinstance(attn.v_proj, ColumnParallelLinear)
-        assert isinstance(attn.o_proj, RowParallelLinear)
+        assert isinstance(attn.q_proj, torch.nn.Linear)
+        assert isinstance(attn.k_proj, torch.nn.Linear)
+        assert isinstance(attn.v_proj, torch.nn.Linear)
+        assert isinstance(attn.o_proj, torch.nn.Linear)
 
     def test_forward_with_tp_layers(self):
         from vllm_i64.models.complexity_deep.config import ComplexityDeepConfig
