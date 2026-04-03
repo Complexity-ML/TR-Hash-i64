@@ -29,7 +29,7 @@ from vllm_i64.models.complexity_deep.model import (
     MoEMLP,
     DenseSwiGLUMLP,
     RotaryEmbedding,
-    apply_rotary_pos_emb,
+    apply_rotary,
 )
 
 
@@ -97,9 +97,10 @@ class TestRotaryEmbedding:
     def test_apply_rotary(self):
         rope = RotaryEmbedding(dim=32)
         cos, sin = rope(8)
-        q = torch.randn(1, 4, 8, 32)
-        k = torch.randn(1, 2, 8, 32)
-        q_rot, k_rot = apply_rotary_pos_emb(q, k, cos, sin)
+        q = torch.randn(8, 4, 32)
+        k = torch.randn(8, 2, 32)
+        q_rot = apply_rotary(q, cos, sin)
+        k_rot = apply_rotary(k, cos, sin)
         assert q_rot.shape == q.shape
         assert k_rot.shape == k.shape
 
