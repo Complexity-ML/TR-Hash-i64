@@ -706,7 +706,8 @@ class ComplexityDeepModel(nn.Module):
         if is_first_pp_rank():
             hidden = self.embed_tokens(token_ids.long())
             if hasattr(self, 'mu_init'):
-                mu_prev = self.mu_init.expand(hidden.shape[0], hidden.shape[1], -1)
+                # Engine passes [N, hidden] (flattened batch*seq), expand mu_init to match
+                mu_prev = self.mu_init.view(1, -1).expand(hidden.shape[0], -1)
             else:
                 mu_prev = None
         else:
