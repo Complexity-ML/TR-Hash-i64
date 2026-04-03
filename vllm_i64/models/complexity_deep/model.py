@@ -1,110 +1,180 @@
 """
-vllm-i64 :: Complexity Deep Model
+Complexity Deep Model for vllm-i64.
 
-Specific implementation for the Complexity Deep architecture.
-Uses the GENERIC TokenRoutedMLP layer + adds:
-  - Mu-Guidance (lightweight mu projection between layers)
-  - Mu-Guided Attention (mu biases Q, K, V)
-  - Mu-Guided Routing (mu overrides i64 base routing)
-  - Mu Residual Highway (accumulated context across layers)
-  - GQA, QK Norm
+Rewritten to match the complexity-framework forward pass exactly.
+Supports both Token-Routed MoE and Dense SwiGLU models.
 
-Tensor Parallelism:
-  - Q/K/V projections: ColumnParallel (heads sharded)
-  - O projection: RowParallel + all_reduce
-  - Expert MLP: sharded on intermediate dim (via TokenRoutedMLP)
-  - INL Dynamics: replicated (small controller)
-  - Embeddings: replicated
-
-Other models can use TokenRoutedMLP directly without any of this.
-
-INL - 2025
+Complexity-ML — 2026
 """
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
 from typing import Optional, Tuple, List
 
 from vllm_i64.layers.token_routed_mlp import TokenRoutedMLP
-from vllm_i64.layers.rmsnorm import RMSNorm
-from vllm_i64.layers.rotary import RotaryEmbedding, apply_rotary
-from vllm_i64.models.complexity_deep.config import ComplexityDeepConfig
-from vllm_i64.parallel.tensor_parallel import (
-    get_tp, ColumnParallelLinear, RowParallelLinear,
-)
 
 
 # =========================================================================
-# Mu Projection (replaces PiD dynamics — lightweight mu guidance)
+# RoPE
 # =========================================================================
 
-class MuProjection(nn.Module):
-    """
-    Mu-Guidance — learnable equilibrium with contextual projection.
-
-    Matches vllm-cuda_graph MuGuidance exactly:
-        mu_contextual = clamp(mu, 0, 2) + mu_proj(h)
-    """
-
-    def __init__(self, hidden_size: int, mu_min: float = 0.0, mu_max: float = 2.0):
+class RotaryEmbedding(nn.Module):
+    def __init__(self, dim, max_seq_len=4096, theta=10000.0):
         super().__init__()
-        self.hidden_size = hidden_size
-        self.mu_min = mu_min
-        self.mu_max = mu_max
+        inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer("inv_freq", inv_freq)
+        self.max_seq_len = max_seq_len
 
-        self.mu = nn.Parameter(torch.full((hidden_size,), (mu_min + mu_max) / 2))
+    def forward(self, seq_len):
+        t = torch.arange(seq_len, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+        freqs = torch.outer(t, self.inv_freq)
+        cos = freqs.cos()
+        sin = freqs.sin()
+        return cos, sin
+
+
+def apply_rotary_pos_emb(q, k, cos, sin):
+    """Apply RoPE. q,k: [batch, heads, seq, head_dim]."""
+    cos = cos.unsqueeze(0).unsqueeze(0)  # [1, 1, seq, dim/2]
+    sin = sin.unsqueeze(0).unsqueeze(0)
+
+    def rotate(x, cos, sin):
+        x1, x2 = x.chunk(2, dim=-1)
+        return torch.cat([x1 * cos - x2 * sin, x2 * cos + x1 * sin], dim=-1)
+
+    return rotate(q, cos, sin), rotate(k, cos, sin)
+
+
+# =========================================================================
+# Mu-Guidance
+# =========================================================================
+
+class MuGuidance(nn.Module):
+    """Mu-Guidance — matches framework MuProjection."""
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.mu = nn.Parameter(torch.ones(hidden_size))
         self.mu_proj = nn.Linear(hidden_size, hidden_size, bias=False)
         nn.init.zeros_(self.mu_proj.weight)
 
-    def forward(
-        self, h: torch.Tensor, v: Optional[torch.Tensor] = None
-    ) -> Tuple[torch.Tensor, None, torch.Tensor]:
-        mu_clamped = torch.clamp(self.mu, self.mu_min, self.mu_max)
-        mu_contextual = mu_clamped + self.mu_proj(h)
-        return h, None, mu_contextual
-
+    def forward(self, h):
+        return torch.clamp(self.mu + self.mu_proj(h), -2.0, 2.0)
 
 
 # =========================================================================
-# Dense SwiGLU MLP (for num_experts == 1 / dense baseline)
+# GQA Attention — matches framework gqa.py
+# =========================================================================
+
+class Attention(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        self.num_heads = config.num_attention_heads
+        self.num_kv_heads = config.num_key_value_heads
+        self.head_dim = self.hidden_size // self.num_heads
+        self.num_kv_groups = self.num_heads // self.num_kv_heads
+
+        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
+        self.k_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
+        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
+
+        self.mu_to_q = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
+        self.mu_to_k = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
+        self.mu_to_v = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
+
+        self.use_qk_norm = getattr(config, 'use_qk_norm', False)
+        if self.use_qk_norm:
+            self.q_norm = nn.RMSNorm(self.head_dim, eps=1e-6)
+            self.k_norm = nn.RMSNorm(self.head_dim, eps=1e-6)
+
+        self.rotary_emb = RotaryEmbedding(
+            self.head_dim,
+            max_seq_len=getattr(config, 'max_position_embeddings', 4096),
+            theta=getattr(config, 'rope_theta', 10000.0),
+        )
+
+    def forward(self, hidden_states, attention_mask=None, past_key_value=None,
+                use_cache=False, mu_prev=None, **kwargs):
+        batch_size, seq_len, _ = hidden_states.shape
+
+        q = self.q_proj(hidden_states)
+        k = self.k_proj(hidden_states)
+        v = self.v_proj(hidden_states)
+
+        if mu_prev is not None:
+            q = q + self.mu_to_q(mu_prev)
+            k = k + self.mu_to_k(mu_prev)
+            v = v + self.mu_to_v(mu_prev)
+
+        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        v = v.view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
+
+        if self.use_qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+
+        kv_seq_len = seq_len
+        if past_key_value is not None:
+            kv_seq_len += past_key_value[0].shape[2]
+
+        cos, sin = self.rotary_emb(kv_seq_len)
+        cos = cos.to(q.device, dtype=q.dtype)
+        sin = sin.to(q.device, dtype=q.dtype)
+
+        if past_key_value is not None:
+            cos = cos[kv_seq_len - seq_len:]
+            sin = sin[kv_seq_len - seq_len:]
+
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+
+        if past_key_value is not None:
+            k = torch.cat([past_key_value[0], k], dim=2)
+            v = torch.cat([past_key_value[1], v], dim=2)
+
+        new_past_key_value = (k, v) if use_cache else None
+
+        k = k.repeat_interleave(self.num_kv_groups, dim=1)
+        v = v.repeat_interleave(self.num_kv_groups, dim=1)
+
+        attn_output = F.scaled_dot_product_attention(
+            q, k, v, is_causal=(past_key_value is None and seq_len > 1),
+        )
+
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.view(batch_size, seq_len, -1)
+        attn_output = self.o_proj(attn_output)
+
+        return attn_output, new_past_key_value
+
+
+# =========================================================================
+# Dense SwiGLU MLP
 # =========================================================================
 
 class DenseSwiGLUMLP(nn.Module):
-    """Standard dense SwiGLU MLP for dense baseline models."""
-
-    def __init__(self, config: ComplexityDeepConfig):
+    def __init__(self, config):
         super().__init__()
         self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
         self.up_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
         self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
 
-    def forward(self, x, token_ids=None, mu=None, x_preq=None, **kwargs):
+    def forward(self, x, token_ids=None, **kwargs):
         return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
 
 
 # =========================================================================
-# Mu-Guided Token-Routed MLP (extends generic TokenRoutedMLP)
+# MoE MLP — wraps TokenRoutedMLP for [batch, seq, hidden] format
 # =========================================================================
 
-class MuGuidedTokenRoutedMLP(TokenRoutedMLP):
-    """
-    Complexity Deep extension of TokenRoutedMLP.
-
-    Adds mu-guided routing on top of the generic i64 routing:
-        base_id = token_id % num_experts          (generic, i64)
-        mu_logits = mu_router(mu)                  (Complexity Deep specific)
-        combined = one_hot(base_id) * 10 + mu_logits
-        expert_id = argmax(combined)
-
-    Without mu, falls back to pure i64 routing (generic behavior).
-    """
-
-    _BASE_ROUTING_SCALE = 10.0
-
-    def __init__(self, config: ComplexityDeepConfig):
-        super().__init__(
+class MoEMLP(nn.Module):
+    """Wraps TokenRoutedMLP to handle [batch, seq, hidden] input."""
+    def __init__(self, config):
+        super().__init__()
+        self.tr_mlp = TokenRoutedMLP(
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             num_experts=config.num_experts,
@@ -112,669 +182,136 @@ class MuGuidedTokenRoutedMLP(TokenRoutedMLP):
             shared_expert=getattr(config, 'shared_expert', False),
             shared_intermediate_size=getattr(config, 'shared_intermediate_size', None) or 0,
         )
-        # Mu-guided routing bias (Complexity Deep specific)
-        self.mu_router = nn.Linear(config.hidden_size, config.num_experts, bias=False)
-        nn.init.zeros_(self.mu_router.weight)
 
-    def route(self, token_ids, num_tokens, device, mu=None):
-        """i64 routing + optional mu bias."""
-        base_ids = super().route(token_ids, num_tokens, device)
-
-        if mu is not None:
-            mu_logits = self.mu_router(mu.to(self.mu_router.weight.dtype))
-            base_one_hot = F.one_hot(base_ids, self.num_experts).float()
-            combined = base_one_hot * self._BASE_ROUTING_SCALE + mu_logits
-            return combined.argmax(dim=-1)
-
-        return base_ids
-
-    def forward(self, x, token_ids=None, mu=None, x_preq=None, **kwargs):
-        expert_ids = self.route(token_ids, x.shape[0], x.device, mu=mu)
-        return self.expert_forward(x, expert_ids)
+    def forward(self, x, token_ids=None, **kwargs):
+        B, S, H = x.shape
+        flat_x = x.view(-1, H)
+        flat_ids = token_ids.view(-1) if token_ids is not None else None
+        out = self.tr_mlp(flat_x, token_ids=flat_ids)
+        return out.view(B, S, H)
 
 
 # =========================================================================
-# Mu-Guided Attention (GQA + QK norm + RoPE)
-# =========================================================================
-
-class MuGuidedAttention(nn.Module):
-    """
-    Complexity Deep attention with Tensor Parallelism.
-
-    TP strategy:
-      - Q/K/V: ColumnParallel — heads sharded across ranks
-      - O: RowParallel — input dim sharded, all_reduce on output
-      - mu_to_q/k/v: ColumnParallel (matches Q/K/V sharding)
-
-    Complexity Deep specific: mu biases Q, K, V from previous layer
-    Generic parts: GQA, QK norm, RoPE
-    """
-
-    def __init__(self, config: ComplexityDeepConfig):
-        super().__init__()
-        tp = get_tp()
-
-        self.hidden_size = config.hidden_size
-        self.num_heads = config.num_attention_heads
-        self.num_kv_heads = config.num_key_value_heads
-        self.head_dim = config.head_dim
-        self.tp_size = tp.tp_size
-
-        # TP-sharded head counts (GQA: replicate KV heads when fewer than TP ranks)
-        self.num_heads_per_tp = self.num_heads // tp.tp_size
-        if self.num_kv_heads >= tp.tp_size:
-            self.num_kv_heads_per_tp = self.num_kv_heads // tp.tp_size
-        else:
-            self.num_kv_heads_per_tp = self.num_kv_heads
-        self.num_kv_groups = self.num_heads_per_tp // self.num_kv_heads_per_tp
-
-        # Q/K/V — ColumnParallel (output dim = heads * head_dim, sharded)
-        self.q_proj = ColumnParallelLinear(config.hidden_size, self.num_heads * self.head_dim)
-        self.k_proj = ColumnParallelLinear(config.hidden_size, self.num_kv_heads * self.head_dim)
-        self.v_proj = ColumnParallelLinear(config.hidden_size, self.num_kv_heads * self.head_dim)
-
-        # O — RowParallel (input dim sharded, all_reduce on output)
-        self.o_proj = RowParallelLinear(self.num_heads * self.head_dim, config.hidden_size)
-
-        # Mu-guided projections — ColumnParallel (matches Q/K/V sharding)
-        self.mu_to_q = ColumnParallelLinear(config.hidden_size, self.num_heads * self.head_dim)
-        self.mu_to_k = ColumnParallelLinear(config.hidden_size, self.num_kv_heads * self.head_dim)
-        self.mu_to_v = ColumnParallelLinear(config.hidden_size, self.num_kv_heads * self.head_dim)
-        for proj in [self.mu_to_q, self.mu_to_k, self.mu_to_v]:
-            nn.init.normal_(proj.linear.weight, std=0.01)
-
-        # QK Norm (per head_dim, replicated)
-        self.use_qk_norm = config.use_qk_norm
-        if self.use_qk_norm:
-            self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-            self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-
-        # RoPE (replicated)
-        self.rope = RotaryEmbedding(self.head_dim, config.max_position_embeddings, config.rope_theta)
-
-    def _project_qkv_int8(self, hidden: torch.Tensor, mu_prev: Optional[torch.Tensor], x_preq=None):
-        """INT8 fused QKV + mu projections."""
-        from vllm_i64.core.quantization import int8_linear_native
-
-        # Fused QKV: single INT8 matmul → split
-        qkv = int8_linear_native(hidden, self.qkv_int8, self.qkv_scale,
-                                 getattr(self, 'qkv_bias', None), x_preq=x_preq)
-        q = qkv[:, :self.q_size]
-        k = qkv[:, self.q_size:self.q_size + self.kv_size]
-        v = qkv[:, self.q_size + self.kv_size:]
-
-        # Mu-guidance INT8
-        if mu_prev is not None and hasattr(self, 'mu_qkv_int8'):
-            mu_qkv = int8_linear_native(mu_prev, self.mu_qkv_int8, self.mu_qkv_scale)
-            q = q + mu_qkv[:, :self.q_size]
-            k = k + mu_qkv[:, self.q_size:self.q_size + self.kv_size]
-            v = v + mu_qkv[:, self.q_size + self.kv_size:]
-        elif mu_prev is not None:
-            q = q + self.mu_to_q(mu_prev)
-            k = k + self.mu_to_k(mu_prev)
-            v = v + self.mu_to_v(mu_prev)
-
-        return q, k, v
-
-    def forward(
-        self,
-        hidden: torch.Tensor,
-        positions: torch.Tensor,
-        mu_prev: Optional[torch.Tensor] = None,
-        mask: Optional[torch.Tensor] = None,
-        kv_cache=None,
-        layer_idx: int = 0,
-        seq_ids: Optional[List[int]] = None,
-        tokens_per_seq: Optional[List[int]] = None,
-        x_preq=None,
-    ) -> torch.Tensor:
-        bsz = hidden.shape[0]
-
-        # INT8 path: fused QKV + mu projections
-        if hasattr(self, 'qkv_int8'):
-            q, k, v = self._project_qkv_int8(hidden, mu_prev, x_preq=x_preq)
-        else:
-            # Float path
-            q = self.q_proj(hidden)
-            k = self.k_proj(hidden)
-            v = self.v_proj(hidden)
-
-            if mu_prev is not None:
-                q = q + self.mu_to_q(mu_prev)
-                k = k + self.mu_to_k(mu_prev)
-                v = v + self.mu_to_v(mu_prev)
-
-        # Reshape to per-TP head counts
-        q = q.view(bsz, self.num_heads_per_tp, self.head_dim)
-        k = k.view(bsz, self.num_kv_heads_per_tp, self.head_dim)
-        v = v.view(bsz, self.num_kv_heads_per_tp, self.head_dim)
-
-        # QK Norm
-        if self.use_qk_norm:
-            q = self.q_norm(q)
-            k = self.k_norm(k)
-
-        # RoPE (integer positions → float rotation)
-        cos, sin = self.rope(positions)
-        q = apply_rotary(q, cos, sin)
-        k = apply_rotary(k, cos, sin)
-
-        # === KV Cache path: per-request attention with caching ===
-        if kv_cache is not None and seq_ids is not None and tokens_per_seq is not None:
-            return self._cached_attention(
-                q, k, v, kv_cache, layer_idx, seq_ids, tokens_per_seq, positions,
-            )
-
-        # === Standard path: prefill without cache ===
-        from vllm_i64.layers.attention import (
-            is_flash_attn_available, flash_prefill_attention, naive_varlen_attention,
-        )
-
-        scale = 1.0 / math.sqrt(self.head_dim)
-        tps = tokens_per_seq if tokens_per_seq is not None else [bsz]
-
-        if is_flash_attn_available() and q.is_cuda:
-            out = flash_prefill_attention(q, k, v, tps, softmax_scale=scale)
-        else:
-            out = naive_varlen_attention(q, k, v, tps, self.num_kv_groups, softmax_scale=scale)
-
-        # (total_tokens, num_heads_per_tp, head_dim) → (total_tokens, hidden)
-        out = out.reshape(bsz, self.num_heads_per_tp * self.head_dim)
-        return self._o_proj_int8(out)
-
-    def _o_proj_int8(self, out: torch.Tensor) -> torch.Tensor:
-        """O projection — INT8 if available, else float."""
-        if hasattr(self, 'o_int8'):
-            from vllm_i64.core.quantization import int8_linear_native
-            return int8_linear_native(out, self.o_int8, self.o_scale,
-                                      getattr(self, 'o_bias', None))
-        # Ensure dtype matches o_proj weights
-        if out.dtype != self.o_proj.linear.weight.dtype:
-            out = out.to(self.o_proj.linear.weight.dtype)
-        return self.o_proj(out)
-
-    def decode_step(
-        self,
-        hidden: torch.Tensor,
-        positions: torch.Tensor,
-        mu_prev: Optional[torch.Tensor],
-        kv_cache,
-        layer_idx: int,
-        seq_ids_tensor: torch.Tensor,
-        x_preq=None,
-    ) -> torch.Tensor:
-        """
-        Decode-only attention with tensor-based KV write. CUDA-graph compatible.
-
-        All operations are pure tensor ops: no Python loops, no .item().
-        Used by the engine in CUDA graph mode for the decode hot path.
-        """
-        from vllm_i64.layers.attention import (
-            is_flash_attn_available, flash_decode_attention,
-            naive_paged_decode_attention,
-        )
-
-        bsz = hidden.shape[0]
-
-        # INT8 path: fused QKV + mu projections
-        if hasattr(self, 'qkv_int8'):
-            q, k, v = self._project_qkv_int8(hidden, mu_prev, x_preq=x_preq)
-        else:
-            q = self.q_proj(hidden)
-            k = self.k_proj(hidden)
-            v = self.v_proj(hidden)
-
-            if mu_prev is not None:
-                q = q + self.mu_to_q(mu_prev)
-                k = k + self.mu_to_k(mu_prev)
-                v = v + self.mu_to_v(mu_prev)
-
-        q = q.view(bsz, self.num_heads_per_tp, self.head_dim)
-        k = k.view(bsz, self.num_kv_heads_per_tp, self.head_dim)
-        v = v.view(bsz, self.num_kv_heads_per_tp, self.head_dim)
-
-        if self.use_qk_norm:
-            q = self.q_norm(q)
-            k = self.k_norm(k)
-
-        cos, sin = self.rope(positions)
-        q = apply_rotary(q, cos, sin)
-        k = apply_rotary(k, cos, sin)
-
-        # Tensor-only KV write (graph-safe)
-        kv_cache.write_kv_decode(layer_idx, seq_ids_tensor, positions, k, v)
-
-        # Attention from paged cache
-        scale = 1.0 / math.sqrt(self.head_dim)
-        k_cache, v_cache = kv_cache.get_cache_tensors(layer_idx)
-        block_table = kv_cache.get_block_table_for_seqs_tensor(seq_ids_tensor).clamp(min=0)
-        cache_seqlens = kv_cache.get_cache_seqlens_tensor(seq_ids_tensor)
-
-        use_flash = is_flash_attn_available() and q.is_cuda
-
-        if use_flash:
-            q_4d = q.unsqueeze(1)
-            out = flash_decode_attention(
-                q_4d, k_cache, v_cache,
-                cache_seqlens=cache_seqlens,
-                block_table=block_table,
-                softmax_scale=scale,
-            )
-            out = out.squeeze(1)
-        else:
-            out = naive_paged_decode_attention(
-                q, k_cache, v_cache, block_table, cache_seqlens,
-                self.num_kv_groups, scale,
-            )
-
-        out = out.reshape(bsz, self.num_heads_per_tp * self.head_dim)
-        return self._o_proj_int8(out)
-
-    def _cached_attention(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        kv_cache,
-        layer_idx: int,
-        seq_ids: List[int],
-        tokens_per_seq: List[int],
-        positions: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Per-request attention with KV caching.
-
-        Dispatches to:
-          - flash_attn_with_kv_cache for pure decode (GPU + flash)
-          - flash_attn_varlen_func for prefill with cache (GPU + flash)
-          - naive per-request bmm fallback (CPU or no flash)
-        """
-        from vllm_i64.layers.attention import (
-            is_flash_attn_available, flash_decode_attention,
-            flash_prefill_with_cache, naive_cached_attention,
-        )
-
-        scale = 1.0 / math.sqrt(self.head_dim)
-        use_flash = is_flash_attn_available() and q.is_cuda
-
-        # Step 1: Write new K/V to cache (graph mode uses decode_step path instead)
-        offset = 0
-        for i, seq_id in enumerate(seq_ids):
-            n = tokens_per_seq[i]
-            pos_i = positions[offset:offset + n]
-            k_i = k[offset:offset + n]
-            v_i = v[offset:offset + n]
-            kv_cache.write_kv_batch(layer_idx, seq_id, pos_i, k_i, v_i)
-            offset += n
-
-        is_pure_decode = all(n == 1 for n in tokens_per_seq)
-
-        # === Flash decode: all requests have exactly 1 new token ===
-        if use_flash and is_pure_decode:
-            batch_size = len(seq_ids)
-            q_4d = q.unsqueeze(1)  # (batch, 1, num_heads, head_dim)
-
-            k_cache, v_cache = kv_cache.get_cache_tensors(layer_idx)
-            block_table = kv_cache.get_block_table_for_seqs(seq_ids).clamp(min=0)
-            cache_seqlens = kv_cache.get_cache_seqlens(seq_ids)
-
-            out = flash_decode_attention(
-                q_4d, k_cache, v_cache,
-                cache_seqlens=cache_seqlens,
-                block_table=block_table,
-                softmax_scale=scale,
-            )
-            out = out.squeeze(1)  # (batch, num_heads, head_dim)
-            out = out.reshape(batch_size, self.num_heads_per_tp * self.head_dim)
-            return self._o_proj_int8(out)
-
-        # === Flash prefill with cache ===
-        if use_flash:
-            cu_q = torch.zeros(len(seq_ids) + 1, dtype=torch.int32, device=q.device)
-            cu_k = torch.zeros(len(seq_ids) + 1, dtype=torch.int32, device=q.device)
-            k_parts, v_parts = [], []
-
-            # Batch-read all seq_lens in one GPU→CPU transfer (avoid sync from torch.tensor)
-            import numpy as np
-            seq_ids_tensor = torch.from_numpy(np.array(seq_ids, dtype=np.int64)).to(
-                device=kv_cache.seq_lens.device, non_blocking=True
-            )
-            cached_lens = kv_cache.seq_lens[seq_ids_tensor].tolist()
-
-            for i, seq_id in enumerate(seq_ids):
-                cu_q[i + 1] = cu_q[i] + tokens_per_seq[i]
-                cu_k[i + 1] = cu_k[i] + cached_lens[i]
-                kf, vf = kv_cache.read_kv(layer_idx, seq_id)
-                k_parts.append(kf)
-                v_parts.append(vf)
-
-            k_all = torch.cat(k_parts, dim=0)
-            v_all = torch.cat(v_parts, dim=0)
-
-            out = flash_prefill_with_cache(
-                q, k_all, v_all,
-                cu_seqlens_q=cu_q, cu_seqlens_k=cu_k,
-                max_seqlen_q=max(tokens_per_seq),
-                max_seqlen_k=max(cached_lens) if cached_lens else 0,
-                softmax_scale=scale,
-            )
-            total_tokens = q.shape[0]
-            out = out.reshape(total_tokens, self.num_heads_per_tp * self.head_dim)
-            return self._o_proj_int8(out)
-
-        # === Naive fallback ===
-        outputs = []
-        offset = 0
-        for i, seq_id in enumerate(seq_ids):
-            n = tokens_per_seq[i]
-            q_i = q[offset:offset + n]
-            pos_i = positions[offset:offset + n]
-
-            k_full, v_full = kv_cache.read_kv(layer_idx, seq_id)
-            out_i = naive_cached_attention(
-                q_i, k_full, v_full, self.num_kv_groups, pos_i, softmax_scale=scale,
-            )
-            out_i = out_i.reshape(n, self.num_heads_per_tp * self.head_dim)
-            outputs.append(out_i)
-            offset += n
-
-        out = torch.cat(outputs, dim=0)
-        return self._o_proj_int8(out)
-
-
-# =========================================================================
-# Complexity Deep Decoder Layer
+# Decoder Layer — matches framework block.py
 # =========================================================================
 
 class ComplexityDecoderLayer(nn.Module):
-    """
-    Complexity Deep decoder layer:
-      1. RMSNorm → Mu-Guided Attention
-      2. INL Dynamics (PID → h_next, v_next, mu)
-      3. Residual
-      4. RMSNorm → Mu-Guided Token-Routed MLP
-      5. Residual
-    """
-
-    def __init__(self, config: ComplexityDeepConfig):
+    def __init__(self, config):
         super().__init__()
-        self.use_dynamics = False  # PiD removed — mu_guidance handles inter-layer communication
-        self.disable_mu_guidance = getattr(config, 'disable_mu_guidance', False)
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.self_attn = MuGuidedAttention(config)
+        self.input_layernorm = nn.RMSNorm(config.hidden_size, eps=getattr(config, 'rms_norm_eps', 1e-6))
+        self.self_attn = Attention(config)
+        self.post_attention_layernorm = nn.RMSNorm(config.hidden_size, eps=getattr(config, 'rms_norm_eps', 1e-6))
 
-        # Mu-Guidance (replaces PiD dynamics)
-        if not self.disable_mu_guidance and getattr(config, 'use_mu_guidance', False):
-            self.dynamics = MuProjection(config.hidden_size)
-        else:
-            self.dynamics = None
-
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        if config.num_experts > 1 and config.use_token_routed_mlp:
-            self.mlp = MuGuidedTokenRoutedMLP(config)
+        if config.num_experts > 1 and getattr(config, 'use_token_routed_mlp', True):
+            self.mlp = MoEMLP(config)
         else:
             self.mlp = DenseSwiGLUMLP(config)
 
-    def decode_step(
-        self,
-        hidden: torch.Tensor,
-        positions: torch.Tensor,
-        velocity: Optional[torch.Tensor],
-        token_ids: torch.Tensor,
-        mu_prev: Optional[torch.Tensor],
-        kv_cache,
-        layer_idx: int,
-        seq_ids_tensor: torch.Tensor,
-    ) -> Tuple[torch.Tensor, None, Optional[torch.Tensor]]:
-        """Decode-only layer forward. CUDA-graph compatible."""
-        residual = hidden
-        norm_out = self.input_layernorm(hidden)
-        attn_mu = None if self.disable_mu_guidance else mu_prev
-        hidden = self.self_attn.decode_step(
-            norm_out, positions, mu_prev=attn_mu,
-            kv_cache=kv_cache, layer_idx=layer_idx,
-            seq_ids_tensor=seq_ids_tensor,
+        self.mu_guidance = None
+        if getattr(config, 'use_mu_guidance', False) and not getattr(config, 'disable_mu_guidance', False):
+            self.mu_guidance = MuGuidance(config.hidden_size)
+
+    def forward(self, hidden_states, attention_mask=None, past_key_value=None,
+                use_cache=False, token_ids=None, mu_prev=None, **kwargs):
+        # Attention
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states, new_kv = self.self_attn(
+            hidden_states, attention_mask=attention_mask,
+            past_key_value=past_key_value, use_cache=use_cache,
+            mu_prev=mu_prev,
         )
-        hidden = residual + hidden
+        hidden_states = residual + hidden_states
 
-        residual = hidden
-        norm_out = self.post_attention_layernorm(hidden)
-        hidden = self.mlp(norm_out, token_ids=token_ids)
-        hidden = residual + hidden
+        # MLP
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states, token_ids=token_ids)
+        hidden_states = residual + hidden_states
 
+        # Mu-Guidance after MLP
         mu_current = None
-        if self.dynamics is not None:
-            _, _, mu_current = self.dynamics(hidden)
+        if self.mu_guidance is not None:
+            mu_current = self.mu_guidance(hidden_states)
 
-        return hidden, None, mu_current
-
-    def forward(
-        self,
-        hidden: torch.Tensor,
-        positions: torch.Tensor,
-        velocity: Optional[torch.Tensor] = None,
-        token_ids: Optional[torch.Tensor] = None,
-        mu_prev: Optional[torch.Tensor] = None,
-        kv_cache=None,
-        layer_idx: int = 0,
-        seq_ids: Optional[List[int]] = None,
-        tokens_per_seq: Optional[List[int]] = None,
-    ) -> Tuple[torch.Tensor, None, Optional[torch.Tensor]]:
-        residual = hidden
-        norm_out = self.input_layernorm(hidden)
-        attn_mu = None if self.disable_mu_guidance else mu_prev
-        hidden = self.self_attn(
-            norm_out, positions, mu_prev=attn_mu,
-            kv_cache=kv_cache, layer_idx=layer_idx,
-            seq_ids=seq_ids, tokens_per_seq=tokens_per_seq,
-        )
-        hidden = residual + hidden
-
-        residual = hidden
-        norm_out = self.post_attention_layernorm(hidden)
-        hidden = self.mlp(norm_out, token_ids=token_ids)
-        hidden = residual + hidden
-
-        mu_current = None
-        if self.dynamics is not None:
-            _, _, mu_current = self.dynamics(hidden)
-
-        return hidden, None, mu_current
+        return hidden_states, new_kv, mu_current
 
 
 # =========================================================================
-# Complexity Deep Model
+# Complexity Deep Model — matches framework builder.py
 # =========================================================================
 
 class ComplexityDeepModel(nn.Module):
-    """
-    Complexity Deep transformer with Pipeline Parallelism support.
-
-    Complexity Deep specific:
-      - INL Dynamics per layer
-      - Mu pass-through: mu_prev = mu_current (match training, no clamp, no residual)
-      - Mu-guided attention and routing
-      - Tied embeddings
-
-    Parallelism:
-      - TP: expert weights + attention heads sharded (via layers/)
-      - PP: decoder layers distributed across stages (via make_layers)
-    """
-
-    def __init__(self, config: ComplexityDeepConfig):
+    def __init__(self, config):
         super().__init__()
-        from vllm_i64.parallel.pipeline_parallel import get_pp, is_first_pp_rank, is_last_pp_rank
-        from vllm_i64.parallel.pp_utils import make_layers, PPMissingLayer
-
         self.config = config
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
+        self.layers = nn.ModuleList([ComplexityDecoderLayer(config) for _ in range(config.num_hidden_layers)])
+        self.norm = nn.RMSNorm(config.hidden_size, eps=getattr(config, 'rms_norm_eps', 1e-6))
+        self.tie_word_embeddings = getattr(config, 'tie_word_embeddings', True)
 
-        # Embedding only on first PP stage
-        if is_first_pp_rank():
-            self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
-        else:
-            self.embed_tokens = None
-
-        # PP-aware layer distribution
-        self.start_layer, self.end_layer, self.layers = make_layers(
-            config.num_hidden_layers,
-            lambda idx: ComplexityDecoderLayer(config),
-        )
-
-        # Learnable mu_init for layer 0 (mu-guidance starting signal)
-        if getattr(config, 'use_mu_guidance', False):
+        # Mu init
+        self._has_mu = getattr(config, 'use_mu_guidance', False)
+        if self._has_mu and not getattr(config, 'disable_mu_guidance', False):
             self.mu_init = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
 
-        # Final norm + lm_head only on last PP stage
-        if is_last_pp_rank():
-            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        else:
-            self.norm = None
-
-        self.tie_word_embeddings = config.tie_word_embeddings
-        if not config.tie_word_embeddings and is_last_pp_rank():
-            self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-
-    def _compute_logits(self, hidden: torch.Tensor) -> torch.Tensor:
-        """Compute logits — INT8 lm_head if available, else float32."""
-        if hasattr(self, 'lm_head_int8'):
-            from vllm_i64.core.quantization import int8_linear_native
-            return int8_linear_native(hidden, self.lm_head_int8, self.lm_head_scale)
-        if self.tie_word_embeddings and self.embed_tokens is not None:
-            if hasattr(self, 'embed_int8'):
-                from vllm_i64.core.quantization import int8_linear_native
-                return int8_linear_native(hidden, self.embed_int8, self.embed_scale)
-            return F.linear(hidden.float(), self.embed_tokens.weight.float())
-        if hasattr(self, 'lm_head'):
-            return F.linear(hidden.float(), self.lm_head.weight.float())
-        raise RuntimeError("No lm_head or tied embeddings found — cannot compute logits.")
-
-    def decode_step(
-        self,
-        token_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_cache,
-        seq_ids_tensor: torch.Tensor,
-        velocity_buf: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    def forward(self, input_ids, positions=None, **kwargs):
         """
-        Decode-only forward pass. CUDA-graph compatible.
+        Args:
+            input_ids: [batch, seq_len] or [N] (flattened)
+            positions: ignored (computed internally from seq_len)
         """
-        from vllm_i64.parallel.pipeline_parallel import is_first_pp_rank, is_last_pp_rank
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
 
-        if is_first_pp_rank():
-            hidden = self.embed_tokens(token_ids.long())
-            if hasattr(self, 'mu_init'):
-                mu_prev = self.mu_init.squeeze(1).expand(hidden.shape[0], -1)
-            else:
-                mu_prev = None
-        else:
-            raise RuntimeError("decode_step with pipeline parallelism not yet supported")
+        batch_size, seq_len = input_ids.shape
+        hidden_states = self.embed_tokens(input_ids)
 
-        for layer_idx in range(self.start_layer, self.end_layer):
-            layer = self.layers[layer_idx]
-            hidden, _, mu_current = layer.decode_step(
-                hidden, positions, None,
-                token_ids=token_ids,
+        # Mu init
+        mu_prev = None
+        if self._has_mu and hasattr(self, 'mu_init'):
+            mu_prev = self.mu_init.expand(batch_size, seq_len, -1)
+
+        for layer in self.layers:
+            hidden_states, _, mu_current = layer(
+                hidden_states,
+                token_ids=input_ids,
                 mu_prev=mu_prev,
-                kv_cache=kv_cache,
-                layer_idx=layer_idx,
-                seq_ids_tensor=seq_ids_tensor,
             )
             if mu_current is not None:
-                mu_prev = torch.clamp(mu_current, -2.0, 2.0)
+                mu_prev = mu_current
 
-        if not is_last_pp_rank():
-            raise RuntimeError("decode_step with pipeline parallelism not yet supported")
+        hidden_states = self.norm(hidden_states)
 
-        hidden = self.norm(hidden)
-        return self._compute_logits(hidden)
-
-    def forward(
-        self,
-        token_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_cache=None,
-        seq_ids: Optional[List[int]] = None,
-        tokens_per_seq: Optional[List[int]] = None,
-        intermediate_tensors=None,
-    ) -> torch.Tensor:
-        """Returns logits (last stage) or IntermediateTensors (other stages)."""
-        from vllm_i64.parallel.pipeline_parallel import is_first_pp_rank, is_last_pp_rank
-        from vllm_i64.parallel.pp_utils import IntermediateTensors
-
-        if is_first_pp_rank():
-            hidden = self.embed_tokens(token_ids.long())
-            if hasattr(self, 'mu_init'):
-                # Engine passes [N, hidden] (flattened batch*seq), expand mu_init to match
-                mu_prev = self.mu_init.view(1, -1).expand(hidden.shape[0], -1)
-            else:
-                mu_prev = None
+        # Logits
+        if self.tie_word_embeddings:
+            logits = F.linear(hidden_states.float(), self.embed_tokens.weight.float())
         else:
-            assert intermediate_tensors is not None
-            hidden = intermediate_tensors["hidden_states"]
-            mu_prev = intermediate_tensors.get("mu_prev")
+            logits = self.lm_head(hidden_states)
 
-        for layer_idx in range(self.start_layer, self.end_layer):
-            layer = self.layers[layer_idx]
-            hidden, _, mu_current = layer(
-                hidden, positions, None,
-                token_ids=token_ids,
-                mu_prev=mu_prev,
-                kv_cache=kv_cache,
-                layer_idx=layer_idx,
-                seq_ids=seq_ids,
-                tokens_per_seq=tokens_per_seq,
-            )
-            if mu_current is not None:
-                mu_prev = torch.clamp(mu_current, -2.0, 2.0)
+        return logits.squeeze(0) if logits.shape[0] == 1 else logits
 
-        if not is_last_pp_rank():
-            return IntermediateTensors({
-                "hidden_states": hidden,
-                "mu_prev": mu_prev,
-            })
-
-        hidden = self.norm(hidden)
-        return self._compute_logits(hidden)
-
-    def num_parameters(self) -> int:
+    def num_parameters(self):
         return sum(p.numel() for p in self.parameters())
 
     def load_framework_checkpoint(self, state_dict: dict):
-        """Load weights from complexity-framework checkpoint format.
-
-        Handles key mapping differences between framework and vllm-i64:
-        - self_attn.q_proj.weight -> self_attn.q_proj.linear.weight
-        - mu_guidance.* -> dynamics.*
-        - rotary_emb.inv_freq -> rope.inv_freq
-        - Skips keys not in model (mu_init, token_to_expert, q_norm, k_norm)
-        """
+        """Load weights from complexity-framework checkpoint format."""
         mapped = {}
         for k, v in state_dict.items():
             new_key = k
-
-            # Attention: q_proj.weight -> q_proj.linear.weight
-            for proj in ("q_proj", "k_proj", "v_proj", "o_proj", "mu_to_q", "mu_to_k", "mu_to_v"):
-                if f"self_attn.{proj}.weight" in new_key:
-                    new_key = new_key.replace(f"self_attn.{proj}.weight", f"self_attn.{proj}.linear.weight")
+            # MoE MLP: gate_proj_w -> mlp.tr_mlp.gate_proj_w
+            for proj in ("gate_proj_w", "up_proj_w", "down_proj_w", "token_to_expert"):
+                if f"mlp.{proj}" in new_key and "tr_mlp" not in new_key:
+                    new_key = new_key.replace(f"mlp.{proj}", f"mlp.tr_mlp.{proj}")
                     break
-
-            # RoPE: rotary_emb.inv_freq -> rope.inv_freq
-            new_key = new_key.replace("rotary_emb.inv_freq", "rope.inv_freq")
-
-            # Mu guidance: mu_guidance.* -> dynamics.*
-            new_key = new_key.replace("mu_guidance.", "dynamics.")
-
+            # Shared expert: shared_gate -> mlp.tr_mlp.shared_gate
+            for proj in ("shared_gate", "shared_up", "shared_down"):
+                if f"mlp.{proj}" in new_key and "tr_mlp" not in new_key:
+                    new_key = new_key.replace(f"mlp.{proj}", f"mlp.tr_mlp.{proj}")
+                    break
+            # mu_guidance -> mu_guidance (same name, no change needed)
+            # rotary_emb -> rotary_emb (same name)
             mapped[new_key] = v
 
-        # Load with strict=False to skip missing dynamics controller, mu_router, etc.
         missing, unexpected = self.load_state_dict(mapped, strict=False)
-
-        # Initialize missing mu_router to zeros (deterministic routing dominates)
-        for key in missing:
-            if "mu_router" in key:
-                param = dict(self.named_parameters()).get(key)
-                if param is not None:
-                    param.data.zero_()
-
         return missing, unexpected
