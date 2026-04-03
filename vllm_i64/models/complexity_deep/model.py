@@ -255,12 +255,16 @@ class ComplexityDeepModel(nn.Module):
         if self._has_mu and not getattr(config, 'disable_mu_guidance', False):
             self.mu_init = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
 
-    def forward(self, input_ids=None, positions=None, token_ids=None, **kwargs):
+    def forward(self, input_ids=None, positions=None, token_ids=None,
+                kv_cache=None, seq_ids=None, tokens_per_seq=None, **kwargs):
         """
         Args:
             input_ids: [batch, seq_len] or [N] (flattened)
             token_ids: alias for input_ids (used by I64Engine)
-            positions: ignored (computed internally from seq_len)
+            positions: not used (RoPE computed from KV cache length)
+            kv_cache: list of (k, v) per layer, or None
+            seq_ids: not used
+            tokens_per_seq: not used
         """
         if input_ids is None:
             input_ids = token_ids
@@ -275,14 +279,25 @@ class ComplexityDeepModel(nn.Module):
         if self._has_mu and hasattr(self, 'mu_init'):
             mu_prev = self.mu_init.expand(batch_size, seq_len, -1)
 
-        for layer in self.layers:
-            hidden_states, _, mu_current = layer(
+        new_kv_cache = []
+        for i, layer in enumerate(self.layers):
+            past_kv = None
+            if kv_cache is not None and i < len(kv_cache):
+                past_kv = kv_cache[i]
+
+            hidden_states, new_kv, mu_current = layer(
                 hidden_states,
+                past_key_value=past_kv,
+                use_cache=True,
                 token_ids=input_ids,
                 mu_prev=mu_prev,
             )
+            new_kv_cache.append(new_kv)
             if mu_current is not None:
                 mu_prev = mu_current
+
+        # Store KV cache for next call
+        self._kv_cache = new_kv_cache
 
         hidden_states = self.norm(hidden_states)
 
