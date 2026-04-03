@@ -255,12 +255,15 @@ class ComplexityDeepModel(nn.Module):
         if self._has_mu and not getattr(config, 'disable_mu_guidance', False):
             self.mu_init = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
 
-    def forward(self, input_ids, positions=None, **kwargs):
+    def forward(self, input_ids=None, positions=None, token_ids=None, **kwargs):
         """
         Args:
             input_ids: [batch, seq_len] or [N] (flattened)
+            token_ids: alias for input_ids (used by I64Engine)
             positions: ignored (computed internally from seq_len)
         """
+        if input_ids is None:
+            input_ids = token_ids
         if input_ids.dim() == 1:
             input_ids = input_ids.unsqueeze(0)
 
