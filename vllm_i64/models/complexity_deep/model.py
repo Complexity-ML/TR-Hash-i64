@@ -31,19 +31,24 @@ class RotaryEmbedding(nn.Module):
         self.register_buffer("inv_freq", inv_freq)
 
     def forward(self, positions):
-        """positions: [N] integer tensor."""
+        """positions: [N] integer tensor. Returns cos, sin of shape [N, dim]."""
         freqs = torch.outer(positions.float(), self.inv_freq.to(positions.device))
-        cos = freqs.cos()
-        sin = freqs.sin()
-        return cos, sin
+        emb = torch.cat([freqs, freqs], dim=-1)  # [N, dim]
+        return emb.cos(), emb.sin()
+
+
+def _rotate_half(x):
+    """Rotate half the hidden dims: [-x2, x1]."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat([-x2, x1], dim=-1)
 
 
 def apply_rotary(x, cos, sin):
-    """x: [N, heads, head_dim], cos/sin: [N, head_dim/2]."""
-    cos = cos.unsqueeze(1)  # [N, 1, dim/2]
+    """x: [N, heads, head_dim], cos/sin: [N, head_dim]."""
+    cos = cos.unsqueeze(1)  # [N, 1, head_dim]
     sin = sin.unsqueeze(1)
-    x1, x2 = x.chunk(2, dim=-1)
-    return torch.cat([x1 * cos - x2 * sin, x2 * cos + x1 * sin], dim=-1)
+    return (x * cos) + (_rotate_half(x) * sin)
 
 
 # =========================================================================

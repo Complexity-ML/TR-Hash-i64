@@ -91,8 +91,8 @@ class TestRotaryEmbedding:
     def test_output_shapes(self):
         rope = RotaryEmbedding(dim=32, max_seq_len=128)
         cos, sin = rope(torch.arange(10))
-        assert cos.shape == (10, 16)
-        assert sin.shape == (10, 16)
+        assert cos.shape == (10, 32)
+        assert sin.shape == (10, 32)
 
     def test_apply_rotary(self):
         rope = RotaryEmbedding(dim=32)
