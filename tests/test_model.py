@@ -3,12 +3,14 @@ vllm-i64 :: Test Model Forward Pass
 
 Tests ComplexityDeepModel end-to-end on CPU:
   - Correct output shapes
-  - INL Dynamics produces velocity + mu
-  - MuGuidedAttention with TP=1
-  - MuGuidedTokenRoutedMLP routing
+  - Mu-Guidance produces mu_current
+  - Attention with GQA + RoPE + QK Norm
+  - TokenRoutedMLP routing (MoE)
+  - DenseSwiGLUMLP (dense baseline)
   - Full forward: token_ids → logits
+  - Weight loading from framework checkpoints
 
-INL - 2025
+Complexity-ML — 2026
 """
 
 import torch
@@ -22,14 +24,19 @@ from vllm_i64.models.complexity_deep.config import ComplexityDeepConfig
 from vllm_i64.models.complexity_deep.model import (
     ComplexityDeepModel,
     ComplexityDecoderLayer,
-    MuGuidedAttention,
-    MuGuidedTokenRoutedMLP,
-    INLDynamics,
+    Attention,
+    MuGuidance,
+    MoEMLP,
+    DenseSwiGLUMLP,
+    RotaryEmbedding,
+    apply_rotary_pos_emb,
 )
 
 
+# ── Fixtures ──
+
 @pytest.fixture
-def small_config():
+def moe_config():
     return ComplexityDeepConfig(
         hidden_size=128,
         num_hidden_layers=2,
@@ -39,150 +46,235 @@ def small_config():
         num_experts=4,
         vocab_size=256,
         max_position_embeddings=128,
+        use_token_routed_mlp=True,
+        shared_expert=True,
+        use_mu_guidance=True,
+        use_qk_norm=True,
     )
 
 
 @pytest.fixture
-def model(small_config):
-    m = ComplexityDeepModel(small_config)
+def dense_config():
+    return ComplexityDeepConfig(
+        hidden_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        intermediate_size=512,
+        num_experts=1,
+        vocab_size=256,
+        max_position_embeddings=128,
+        use_token_routed_mlp=False,
+        shared_expert=False,
+        use_mu_guidance=False,
+        use_qk_norm=True,
+    )
+
+
+@pytest.fixture
+def moe_model(moe_config):
+    m = ComplexityDeepModel(moe_config)
     m.eval()
     return m
 
 
-class TestINLDynamics:
+@pytest.fixture
+def dense_model(dense_config):
+    m = ComplexityDeepModel(dense_config)
+    m.eval()
+    return m
+
+
+# ── RoPE ──
+
+class TestRotaryEmbedding:
     def test_output_shapes(self):
-        dyn = INLDynamics(hidden_size=64)
-        h = torch.randn(8, 64)
-        h_next, v_next, mu = dyn(h)
-        assert h_next.shape == (8, 64)
-        assert v_next.shape == (8, 64)
-        assert mu.shape == (8, 64)
+        rope = RotaryEmbedding(dim=32, max_seq_len=128)
+        cos, sin = rope(10)
+        assert cos.shape == (10, 16)
+        assert sin.shape == (10, 16)
 
-    def test_velocity_init_zeros(self):
-        dyn = INLDynamics(hidden_size=32)
-        h = torch.randn(4, 32)
-        h_next, v_next, mu = dyn(h, v=None)
-        assert v_next is not None
-
-    def test_velocity_clamped(self):
-        dyn = INLDynamics(hidden_size=16)
-        h = torch.randn(2, 16) * 100
-        v = torch.randn(2, 16) * 100
-        _, v_next, _ = dyn(h, v)
-        assert v_next.abs().max() <= 10.0
+    def test_apply_rotary(self):
+        rope = RotaryEmbedding(dim=32)
+        cos, sin = rope(8)
+        q = torch.randn(1, 4, 8, 32)
+        k = torch.randn(1, 2, 8, 32)
+        q_rot, k_rot = apply_rotary_pos_emb(q, k, cos, sin)
+        assert q_rot.shape == q.shape
+        assert k_rot.shape == k.shape
 
 
-class TestMuGuidedTokenRoutedMLP:
-    def test_pure_i64_routing(self, small_config):
-        mlp = MuGuidedTokenRoutedMLP(small_config)
-        x = torch.randn(8, small_config.hidden_size)
-        token_ids = torch.arange(8)
+# ── Mu-Guidance ──
+
+class TestMuGuidance:
+    def test_output_shape(self):
+        mu = MuGuidance(hidden_size=128)
+        h = torch.randn(2, 10, 128)
+        out = mu(h)
+        assert out.shape == (2, 10, 128)
+
+    def test_clamped(self):
+        mu = MuGuidance(hidden_size=128)
+        h = torch.randn(1, 5, 128) * 100
+        out = mu(h)
+        assert out.min() >= -2.0
+        assert out.max() <= 2.0
+
+    def test_zero_init_proj(self):
+        mu = MuGuidance(hidden_size=64)
+        assert mu.mu_proj.weight.abs().sum() == 0
+
+
+# ── Attention ──
+
+class TestAttention:
+    def test_output_shape(self, moe_config):
+        attn = Attention(moe_config)
+        attn.eval()
+        x = torch.randn(2, 10, 128)
+        with torch.no_grad():
+            out, kv = attn(x)
+        assert out.shape == (2, 10, 128)
+        assert kv is None
+
+    def test_with_mu(self, moe_config):
+        attn = Attention(moe_config)
+        attn.eval()
+        x = torch.randn(1, 5, 128)
+        mu = torch.randn(1, 5, 128)
+        with torch.no_grad():
+            out, _ = attn(x, mu_prev=mu)
+        assert out.shape == (1, 5, 128)
+
+    def test_kv_cache(self, moe_config):
+        attn = Attention(moe_config)
+        attn.eval()
+        x = torch.randn(1, 5, 128)
+        with torch.no_grad():
+            _, kv = attn(x, use_cache=True)
+        assert kv is not None
+        assert kv[0].shape[2] == 5  # seq_len cached
+
+        # Decode step with cache
+        x2 = torch.randn(1, 1, 128)
+        with torch.no_grad():
+            out2, kv2 = attn(x2, past_key_value=kv, use_cache=True)
+        assert out2.shape == (1, 1, 128)
+        assert kv2[0].shape[2] == 6  # 5 + 1
+
+
+# ── Dense MLP ──
+
+class TestDenseSwiGLUMLP:
+    def test_output_shape(self, dense_config):
+        mlp = DenseSwiGLUMLP(dense_config)
+        x = torch.randn(2, 10, 128)
+        out = mlp(x)
+        assert out.shape == (2, 10, 128)
+
+
+# ── MoE MLP ──
+
+class TestMoEMLP:
+    def test_output_shape(self, moe_config):
+        mlp = MoEMLP(moe_config)
+        x = torch.randn(2, 10, 128)
+        token_ids = torch.randint(0, 256, (2, 10))
         out = mlp(x, token_ids=token_ids)
-        assert out.shape == (8, small_config.hidden_size)
+        assert out.shape == (2, 10, 128)
 
-    def test_mu_guided_routing(self, small_config):
-        mlp = MuGuidedTokenRoutedMLP(small_config)
-        x = torch.randn(8, small_config.hidden_size)
-        token_ids = torch.arange(8)
-        mu = torch.randn(8, small_config.hidden_size)
-        out = mlp(x, token_ids=token_ids, mu=mu)
-        assert out.shape == (8, small_config.hidden_size)
-
-    def test_fallback_without_mu(self, small_config):
-        mlp = MuGuidedTokenRoutedMLP(small_config)
-        x = torch.randn(4, small_config.hidden_size)
-        token_ids = torch.tensor([0, 1, 2, 3])
-        out_no_mu = mlp(x, token_ids=token_ids, mu=None)
-        assert out_no_mu.shape == (4, small_config.hidden_size)
+    def test_without_token_ids(self, moe_config):
+        mlp = MoEMLP(moe_config)
+        x = torch.randn(1, 5, 128)
+        out = mlp(x, token_ids=None)
+        assert out.shape == (1, 5, 128)
 
 
-class TestMuGuidedAttention:
-    def test_output_shape(self, small_config):
-        attn = MuGuidedAttention(small_config)
-        hidden = torch.randn(8, small_config.hidden_size)
-        positions = torch.arange(8, dtype=torch.int32)
-        out = attn(hidden, positions)
-        assert out.shape == (8, small_config.hidden_size)
+# ── Decoder Layer ──
 
-    def test_with_mu(self, small_config):
-        attn = MuGuidedAttention(small_config)
-        hidden = torch.randn(4, small_config.hidden_size)
-        positions = torch.arange(4, dtype=torch.int32)
-        mu = torch.randn(4, small_config.hidden_size)
-        out = attn(hidden, positions, mu_prev=mu)
-        assert out.shape == (4, small_config.hidden_size)
+class TestDecoderLayer:
+    def test_moe_layer(self, moe_config):
+        layer = ComplexityDecoderLayer(moe_config)
+        layer.eval()
+        x = torch.randn(1, 8, 128)
+        token_ids = torch.randint(0, 256, (1, 8))
+        mu = torch.randn(1, 8, 128)
+        with torch.no_grad():
+            out, kv, mu_current = layer(x, token_ids=token_ids, mu_prev=mu)
+        assert out.shape == (1, 8, 128)
+        assert mu_current is not None
+        assert mu_current.shape == (1, 8, 128)
 
-    def test_gqa_head_counts(self, small_config):
-        attn = MuGuidedAttention(small_config)
-        # 4 Q heads, 2 KV heads → 2 groups
-        assert attn.num_heads_per_tp == 4
-        assert attn.num_kv_heads_per_tp == 2
-        assert attn.num_kv_groups == 2
+    def test_dense_layer(self, dense_config):
+        layer = ComplexityDecoderLayer(dense_config)
+        layer.eval()
+        x = torch.randn(1, 8, 128)
+        with torch.no_grad():
+            out, kv, mu_current = layer(x)
+        assert out.shape == (1, 8, 128)
+        assert mu_current is None
+
+    def test_has_mu_guidance(self, moe_config):
+        layer = ComplexityDecoderLayer(moe_config)
+        assert layer.mu_guidance is not None
+
+    def test_no_mu_guidance_dense(self, dense_config):
+        layer = ComplexityDecoderLayer(dense_config)
+        assert layer.mu_guidance is None
 
 
-class TestComplexityDecoderLayer:
-    def test_forward(self, small_config):
-        layer = ComplexityDecoderLayer(small_config)
-        hidden = torch.randn(8, small_config.hidden_size)
-        positions = torch.arange(8, dtype=torch.int32)
-        velocity = torch.zeros(8, small_config.hidden_size)
-        token_ids = torch.arange(8)
-
-        h_out, v_out, mu = layer(hidden, positions, velocity, token_ids=token_ids)
-        assert h_out.shape == hidden.shape
-        assert v_out.shape == hidden.shape
-        assert mu.shape == hidden.shape
-
+# ── Full Model ──
 
 class TestComplexityDeepModel:
-    def test_forward_logits_shape(self, model, small_config):
-        token_ids = torch.randint(0, small_config.vocab_size, (16,))
-        positions = torch.arange(16, dtype=torch.int32)
-
+    def test_moe_forward(self, moe_model):
+        ids = torch.randint(0, 256, (5,))
         with torch.no_grad():
-            logits = model(token_ids, positions)
+            logits = moe_model(ids)
+        assert logits.shape == (5, 256)
 
-        assert logits.shape == (16, small_config.vocab_size)
-
-    def test_forward_single_token(self, model, small_config):
-        token_ids = torch.tensor([42])
-        positions = torch.tensor([0], dtype=torch.int32)
-
+    def test_moe_batch(self, moe_model):
+        ids = torch.randint(0, 256, (2, 8))
         with torch.no_grad():
-            logits = model(token_ids, positions)
+            logits = moe_model(ids)
+        assert logits.shape == (2, 8, 256)
 
-        assert logits.shape == (1, small_config.vocab_size)
-
-    def test_tied_embeddings(self, model):
-        assert model.tie_word_embeddings is True
-        assert not hasattr(model, "lm_head") or model.lm_head is None if hasattr(model, "lm_head") else True
-
-    def test_num_parameters(self, model):
-        n = model.num_parameters()
-        assert n > 0
-        assert isinstance(n, int)
-
-    def test_deterministic(self, model, small_config):
-        token_ids = torch.randint(0, small_config.vocab_size, (8,))
-        positions = torch.arange(8, dtype=torch.int32)
-
+    def test_dense_forward(self, dense_model):
+        ids = torch.randint(0, 256, (5,))
         with torch.no_grad():
-            out1 = model(token_ids, positions)
-            out2 = model(token_ids, positions)
+            logits = dense_model(ids)
+        assert logits.shape == (5, 256)
 
-        assert torch.allclose(out1, out2)
+    def test_has_mu_init(self, moe_model):
+        assert hasattr(moe_model, 'mu_init')
+        assert moe_model.mu_init.shape == (1, 1, 128)
 
-    def test_mu_residual_highway(self, model, small_config):
-        """Verify mu accumulates across layers (not just last layer mu)."""
-        token_ids = torch.randint(0, small_config.vocab_size, (4,))
-        positions = torch.arange(4, dtype=torch.int32)
+    def test_no_mu_init_dense(self, dense_model):
+        assert not hasattr(dense_model, 'mu_init')
 
+    def test_num_parameters(self, moe_model):
+        assert moe_model.num_parameters() > 0
+
+    def test_deterministic(self, moe_model):
+        ids = torch.tensor([1, 2, 3, 4, 5])
         with torch.no_grad():
-            logits = model(token_ids, positions)
+            logits1 = moe_model(ids)
+            logits2 = moe_model(ids)
+        assert torch.allclose(logits1, logits2)
 
-        # Just verify it runs without error — mu highway is internal
-        assert logits.shape == (4, small_config.vocab_size)
 
+# ── Weight Loading ──
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+class TestWeightLoading:
+    def test_moe_load_framework(self, moe_config):
+        model = ComplexityDeepModel(moe_config)
+        state = model.state_dict()
+        missing, unexpected = model.load_framework_checkpoint(state)
+        assert len(missing) == 0
+        assert len(unexpected) == 0
+
+    def test_dense_load_framework(self, dense_config):
+        model = ComplexityDeepModel(dense_config)
+        state = model.state_dict()
+        missing, unexpected = model.load_framework_checkpoint(state)
+        assert len(missing) == 0
+        assert len(unexpected) == 0
