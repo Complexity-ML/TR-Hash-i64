@@ -913,15 +913,7 @@ class I64Engine:
                     else:
                         past_tokens = [[]]
 
-                # Apply min_tokens AFTER repetition penalty so EOS suppression
-                # is not undone by penalty rescaling
-                if params.min_tokens > 0 and req is not None:
-                    eos_id = getattr(req, 'eos_token_id', None)
-                    if eos_id is not None:
-                        from vllm_i64.core.sampling import apply_min_tokens
-                        req_logits = apply_min_tokens(
-                            req_logits, req.num_generated, params.min_tokens, eos_id
-                        )
+                # EOS suppression removed — model handles EOS naturally
 
                 # Apply logits processors if configured
                 if rid in self._request_processors:

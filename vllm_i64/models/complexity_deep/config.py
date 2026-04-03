@@ -44,7 +44,7 @@ class ComplexityDeepConfig:
     tie_word_embeddings: bool = True
     initializer_range: float = 0.02
 
-    # Token IDs
+    # Token IDs (from tokenizer: </s>=0, <pad>=1, <s>=2)
     pad_token_id: int = 1
     bos_token_id: int = 2
     eos_token_id: int = 0
