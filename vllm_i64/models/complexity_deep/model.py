@@ -155,7 +155,7 @@ class Attention(nn.Module):
         # Write new K/V to cache
         for i, sid in enumerate(seq_ids):
             pos = positions[i].item() if positions.dim() > 0 else 0
-            kv_cache.store(layer_idx, sid, pos, k[i:i+1], v[i:i+1])
+            kv_cache.write_kv(layer_idx, sid, pos, k[i], v[i])
 
         # Gather full K/V from cache per request
         outputs = []
@@ -166,7 +166,7 @@ class Attention(nn.Module):
             n = tokens_per_seq[i]
             q_i = q[offset:offset + n]
 
-            k_full, v_full = kv_cache.gather(layer_idx, sid)
+            k_full, v_full = kv_cache.read_kv(layer_idx, sid)
 
             out_i = naive_cached_attention(
                 q_i, k_full, v_full,
