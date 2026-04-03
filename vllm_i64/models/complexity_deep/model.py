@@ -664,7 +664,10 @@ class ComplexityDeepModel(nn.Module):
 
         if is_first_pp_rank():
             hidden = self.embed_tokens(token_ids.long())
-            mu_prev = self.mu_init.expand(hidden.shape[0], -1, -1).squeeze(1) if hasattr(self, 'mu_init') else None
+            if hasattr(self, 'mu_init'):
+                mu_prev = self.mu_init.squeeze(1).expand(hidden.shape[0], -1)
+            else:
+                mu_prev = None
         else:
             raise RuntimeError("decode_step with pipeline parallelism not yet supported")
 
@@ -702,7 +705,10 @@ class ComplexityDeepModel(nn.Module):
 
         if is_first_pp_rank():
             hidden = self.embed_tokens(token_ids.long())
-            mu_prev = self.mu_init.expand(hidden.shape[0], hidden.shape[1], -1) if hasattr(self, 'mu_init') else None
+            if hasattr(self, 'mu_init'):
+                mu_prev = self.mu_init.expand(hidden.shape[0], hidden.shape[1], -1)
+            else:
+                mu_prev = None
         else:
             assert intermediate_tensors is not None
             hidden = intermediate_tensors["hidden_states"]
