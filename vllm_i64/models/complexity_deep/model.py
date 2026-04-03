@@ -894,3 +894,42 @@ class ComplexityDeepModel(nn.Module):
 
     def num_parameters(self) -> int:
         return sum(p.numel() for p in self.parameters())
+
+    def load_framework_checkpoint(self, state_dict: dict):
+        """Load weights from complexity-framework checkpoint format.
+
+        Handles key mapping differences between framework and vllm-i64:
+        - self_attn.q_proj.weight -> self_attn.q_proj.linear.weight
+        - mu_guidance.* -> dynamics.*
+        - rotary_emb.inv_freq -> rope.inv_freq
+        - Skips keys not in model (mu_init, token_to_expert, q_norm, k_norm)
+        """
+        mapped = {}
+        for k, v in state_dict.items():
+            new_key = k
+
+            # Attention: q_proj.weight -> q_proj.linear.weight
+            for proj in ("q_proj", "k_proj", "v_proj", "o_proj", "mu_to_q", "mu_to_k", "mu_to_v"):
+                if f"self_attn.{proj}.weight" in new_key:
+                    new_key = new_key.replace(f"self_attn.{proj}.weight", f"self_attn.{proj}.linear.weight")
+                    break
+
+            # RoPE: rotary_emb.inv_freq -> rope.inv_freq
+            new_key = new_key.replace("rotary_emb.inv_freq", "rope.inv_freq")
+
+            # Mu guidance: mu_guidance.* -> dynamics.*
+            new_key = new_key.replace("mu_guidance.", "dynamics.")
+
+            mapped[new_key] = v
+
+        # Load with strict=False to skip missing dynamics controller, mu_router, etc.
+        missing, unexpected = self.load_state_dict(mapped, strict=False)
+
+        # Initialize missing mu_router to zeros (deterministic routing dominates)
+        for key in missing:
+            if "mu_router" in key:
+                param = dict(self.named_parameters()).get(key)
+                if param is not None:
+                    param.data.zero_()
+
+        return missing, unexpected
