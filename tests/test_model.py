@@ -132,36 +132,32 @@ class TestAttention:
     def test_output_shape(self, moe_config):
         attn = Attention(moe_config)
         attn.eval()
-        x = torch.randn(2, 10, 128)
+        N = 20  # flattened tokens (e.g. 2 seqs of 10)
+        x = torch.randn(N, 128)
+        positions = torch.arange(N)
         with torch.no_grad():
-            out, kv = attn(x)
-        assert out.shape == (2, 10, 128)
-        assert kv is None
+            out = attn(x, positions, tokens_per_seq=[10, 10])
+        assert out.shape == (N, 128)
 
     def test_with_mu(self, moe_config):
         attn = Attention(moe_config)
         attn.eval()
-        x = torch.randn(1, 5, 128)
-        mu = torch.randn(1, 5, 128)
+        N = 5
+        x = torch.randn(N, 128)
+        mu = torch.randn(N, 128)
+        positions = torch.arange(N)
         with torch.no_grad():
-            out, _ = attn(x, mu_prev=mu)
-        assert out.shape == (1, 5, 128)
+            out = attn(x, positions, mu_prev=mu, tokens_per_seq=[N])
+        assert out.shape == (N, 128)
 
-    def test_kv_cache(self, moe_config):
+    def test_single_token(self, moe_config):
         attn = Attention(moe_config)
         attn.eval()
-        x = torch.randn(1, 5, 128)
+        x = torch.randn(1, 128)
+        positions = torch.tensor([0])
         with torch.no_grad():
-            _, kv = attn(x, use_cache=True)
-        assert kv is not None
-        assert kv[0].shape[2] == 5  # seq_len cached
-
-        # Decode step with cache
-        x2 = torch.randn(1, 1, 128)
-        with torch.no_grad():
-            out2, kv2 = attn(x2, past_key_value=kv, use_cache=True)
-        assert out2.shape == (1, 1, 128)
-        assert kv2[0].shape[2] == 6  # 5 + 1
+            out = attn(x, positions, tokens_per_seq=[1])
+        assert out.shape == (1, 128)
 
 
 # ── Dense MLP ──
@@ -197,22 +193,26 @@ class TestDecoderLayer:
     def test_moe_layer(self, moe_config):
         layer = ComplexityDecoderLayer(moe_config)
         layer.eval()
-        x = torch.randn(1, 8, 128)
-        token_ids = torch.randint(0, 256, (1, 8))
-        mu = torch.randn(1, 8, 128)
+        N = 8
+        x = torch.randn(N, 128)
+        positions = torch.arange(N)
+        token_ids = torch.randint(0, 256, (N,))
+        mu = torch.randn(N, 128)
         with torch.no_grad():
-            out, kv, mu_current = layer(x, token_ids=token_ids, mu_prev=mu)
-        assert out.shape == (1, 8, 128)
+            out, mu_current = layer(x, positions, token_ids=token_ids, mu_prev=mu, tokens_per_seq=[N])
+        assert out.shape == (N, 128)
         assert mu_current is not None
-        assert mu_current.shape == (1, 8, 128)
+        assert mu_current.shape == (N, 128)
 
     def test_dense_layer(self, dense_config):
         layer = ComplexityDecoderLayer(dense_config)
         layer.eval()
-        x = torch.randn(1, 8, 128)
+        N = 8
+        x = torch.randn(N, 128)
+        positions = torch.arange(N)
         with torch.no_grad():
-            out, kv, mu_current = layer(x)
-        assert out.shape == (1, 8, 128)
+            out, mu_current = layer(x, positions, tokens_per_seq=[N])
+        assert out.shape == (N, 128)
         assert mu_current is None
 
     def test_has_mu_guidance(self, moe_config):
@@ -237,7 +237,8 @@ class TestComplexityDeepModel:
         ids = torch.randint(0, 256, (2, 8))
         with torch.no_grad():
             logits = moe_model(ids)
-        assert logits.shape == (2, 8, 256)
+        # Model flattens [2, 8] -> [16] internally, output is [16, vocab]
+        assert logits.shape == (16, 256)
 
     def test_dense_forward(self, dense_model):
         ids = torch.randint(0, 256, (5,))
