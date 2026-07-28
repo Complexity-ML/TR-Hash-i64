@@ -562,6 +562,11 @@ def load_model_by_name(
     # Create model — TP layers auto-detect tp_size from global state
     model = model_cls(config)
     model = model.to(dtype)
+    # Dynamic quantization replaces Linear parameters with packed buffers.
+    # Capture the architecture's trainable parameter count before packing so
+    # the public API reports the checkpoint size, not only the parameters that
+    # remain as regular nn.Parameter objects afterwards.
+    parameter_count = sum(parameter.numel() for parameter in model.parameters())
 
     # Auto-detect AWQ/GPTQ from checkpoint if quantization not explicitly set
     effective_quant = quantization
@@ -608,6 +613,9 @@ def load_model_by_name(
             _quantize_rmsnorm(model, effective_quant)
         if tp.tp_rank == 0:
             logger.info("Quantized weights: %s", effective_quant)
+
+    model._vllm_i64_parameter_count = parameter_count
+    model._vllm_i64_quantization = effective_quant or "none"
 
     # Disable grad tracking — inference only, avoids autograd view conflicts
     # with quantized buffers that are views of original parameters.

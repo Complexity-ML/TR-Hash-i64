@@ -141,6 +141,23 @@ async def test_models(client):
     assert data["object"] == "list"
     assert len(data["data"]) == 1
     assert data["data"][0]["id"] == "test-model"
+    assert data["data"][0]["owned_by"] == "Pacific-i64"
+
+
+@pytest.mark.asyncio
+async def test_models_reports_prepacked_parameter_count(client, server):
+    import torch.nn as nn
+
+    model = nn.Linear(3, 2)
+    model._vllm_i64_parameter_count = 306_486_528
+    model._vllm_i64_quantization = "int8"
+    server.sync_engine.model = model
+
+    resp = await client.get("/v1/models")
+    assert resp.status == 200
+    model_info = (await resp.json())["data"][0]
+    assert model_info["parameter_count"] == 306_486_528
+    assert model_info["quantization"] == "int8"
 
 
 # =====================================================================

@@ -22,6 +22,35 @@ logger = get_logger("vllm_i64.server")
 
 class AdminMixin:
 
+    def _public_model_metadata(self) -> dict:
+        metadata = {
+            "id": self.model_name,
+            "object": "model",
+            "owned_by": "Pacific-i64",
+        }
+        if self.sync_engine is None or self.sync_engine.model is None:
+            return metadata
+
+        model = self.sync_engine.model
+        metadata["parameter_count"] = int(
+            getattr(
+                model,
+                "_vllm_i64_parameter_count",
+                sum(parameter.numel() for parameter in model.parameters()),
+            )
+        )
+        metadata["quantization"] = str(
+            getattr(model, "_vllm_i64_quantization", "none")
+        )
+        config = getattr(model, "config", None)
+        if config is not None:
+            metadata["architecture"] = (
+                "token-routed"
+                if getattr(config, "mlp_type", "") == "token_routed"
+                else "dense"
+            )
+        return metadata
+
     async def handle_health(self, request: web.Request) -> web.Response:
         """GET /health"""
         uptime_s = int(time.monotonic() - self._start_time)
@@ -69,7 +98,9 @@ class AdminMixin:
 
     async def handle_models(self, request: web.Request) -> web.Response:
         """GET /v1/models"""
-        return web.json_response({"object": "list", "data": [{"id": self.model_name, "object": "model", "owned_by": "inl"}]})
+        return web.json_response(
+            {"object": "list", "data": [self._public_model_metadata()]}
+        )
 
     async def handle_tokenize(self, request: web.Request) -> web.Response:
         """POST /v1/tokenize"""
@@ -214,14 +245,17 @@ class AdminMixin:
         model_id = request.match_info.get("model_id", "")
         if model_id != self.model_name:
             return web.json_response({"error": {"message": f"Model '{model_id}' not found", "type": "not_found_error"}}, status=404)
-        info = {"id": self.model_name, "object": "model", "owned_by": "inl", "created": int(self._start_time)}
+        info = self._public_model_metadata()
+        info["created"] = int(self._start_time)
         if self.sync_engine.model is not None and hasattr(self.sync_engine.model, 'config'):
             cfg = self.sync_engine.model.config
             info["config"] = {k: getattr(cfg, k, None) for k in (
-                "num_experts", "vocab_size", "hidden_size", "num_hidden_layers",
+                "mlp_type", "top_k", "num_experts", "vocab_size", "hidden_size", "num_hidden_layers",
                 "num_attention_heads", "num_key_value_heads", "head_dim",
             )}
-            info["parameters"] = sum(p.numel() for p in self.sync_engine.model.parameters())
+            # Retain the legacy field while exposing the explicit
+            # parameter_count in both list and detail responses.
+            info["parameters"] = info["parameter_count"]
             info["dtype"] = str(next(self.sync_engine.model.parameters()).dtype)
         info["engine"] = {
             "max_batch_size": self.sync_engine.scheduler.max_batch_size,
