@@ -462,38 +462,103 @@ class AdminMixin:
         return web.json_response(snapshot)
 
     async def handle_expert_stats(self, request: web.Request) -> web.Response:
-        """GET /v1/experts — live expert distribution for currently running requests only."""
+        """GET /v1/experts — live layer-wise routes and expert distribution."""
         engine = self.sync_engine
         num_experts = getattr(engine, "num_experts", 0)
         if num_experts <= 1:
             return web.json_response({"error": "Not a MoE model (num_experts <= 1)"}, status=400)
 
-        # Use the real token_to_expert mapping from the model
-        token_to_expert = None
+        # Every routed layer owns its realized checkpoint lookup. Keeping the
+        # tables separate is important because routing is layer-specific.
+        routed_layers = []
         if engine.model is not None:
-            for module in engine.model.modules():
+            for layer_index, module in enumerate(engine.model.modules()):
                 if hasattr(module, 'token_to_expert'):
-                    token_to_expert = module.token_to_expert
-                    break
+                    routed_layers.append((
+                        layer_index,
+                        module.token_to_expert,
+                        max(1, int(getattr(module, "top_k", 1))),
+                    ))
 
         expert_counts = [0] * num_experts
         total_tokens = 0
-        for req in list(engine.scheduler.running):
+        total_activations = 0
+        latest_token_id = None
+        latest_routes = []
+        running_requests = list(engine.scheduler.running)
+        for req in running_requests:
             for tid in req.output_token_ids:
-                if token_to_expert is not None:
-                    eid = token_to_expert[int(tid) % len(token_to_expert)].item()
+                token_id = int(tid)
+                latest_token_id = token_id
+                if routed_layers:
+                    for _, route_table, top_k in routed_layers:
+                        primary = int(route_table[token_id % len(route_table)].item())
+                        for route_index in range(min(top_k, num_experts)):
+                            expert_id = (primary + route_index) % num_experts
+                            expert_counts[expert_id] += 1
+                            total_activations += 1
                 else:
-                    eid = int(tid) % num_experts
-                expert_counts[eid] += 1
+                    expert_counts[token_id % num_experts] += 1
+                    total_activations += 1
                 total_tokens += 1
+
+        if latest_token_id is not None:
+            for layer_number, (_, route_table, top_k) in enumerate(routed_layers):
+                primary = int(route_table[latest_token_id % len(route_table)].item())
+                experts = [
+                    (primary + route_index) % num_experts
+                    for route_index in range(min(top_k, num_experts))
+                ]
+                latest_routes.append({
+                    "layer": layer_number,
+                    "experts": experts,
+                })
+
         if total_tokens > 0:
-            distribution = [round(c / total_tokens, 4) for c in expert_counts]
-            response = {"num_experts": num_experts, "total_tokens": total_tokens,
-                        "distribution": distribution, "counts": expert_counts,
-                        "imbalance": round(max(distribution) - min(distribution), 4)}
+            denominator = max(total_activations, 1)
+            distribution = [round(c / denominator, 4) for c in expert_counts]
+            response = {
+                "num_experts": num_experts,
+                "num_layers": len(routed_layers),
+                "top_k": max((top_k for _, _, top_k in routed_layers), default=1),
+                "active": True,
+                "total_tokens": total_tokens,
+                "total_activations": total_activations,
+                "distribution": distribution,
+                "counts": expert_counts,
+                "imbalance": round(max(distribution) - min(distribution), 4),
+                "latest": {
+                    "token_id": latest_token_id,
+                    "routes": latest_routes,
+                },
+            }
             self._last_expert_response = response
             return web.json_response(response)
+        if running_requests:
+            return web.json_response({
+                "num_experts": num_experts,
+                "num_layers": len(routed_layers),
+                "top_k": max((top_k for _, _, top_k in routed_layers), default=1),
+                "active": True,
+                "total_tokens": 0,
+                "total_activations": 0,
+                "distribution": [0.0] * num_experts,
+                "counts": expert_counts,
+                "latest": None,
+            })
         if self._last_expert_response is not None:
-            return web.json_response(self._last_expert_response)
-        return web.json_response({"num_experts": num_experts, "total_tokens": 0,
-                                  "distribution": [0.0]*num_experts, "counts": expert_counts})
+            return web.json_response({
+                **self._last_expert_response,
+                "active": False,
+            })
+        return web.json_response({
+            "num_experts": num_experts,
+            "num_layers": len(routed_layers),
+            "top_k": max((top_k for _, _, top_k in routed_layers), default=1),
+            "active": False,
+            "total_tokens": 0,
+            "total_activations": 0,
+            "distribution": [0.0] * num_experts,
+            "counts": expert_counts,
+            "latest": None,
+        })

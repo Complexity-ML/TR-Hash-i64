@@ -160,6 +160,41 @@ async def test_models_reports_prepacked_parameter_count(client, server):
     assert model_info["quantization"] == "int8"
 
 
+@pytest.mark.asyncio
+async def test_expert_stats_report_real_top2_routes(client, server):
+    import torch
+    import torch.nn as nn
+    from types import SimpleNamespace
+
+    class RoutedLayer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.register_buffer("token_to_expert", torch.tensor([0, 1, 2, 3]))
+            self.top_k = 2
+
+    model = nn.Module()
+    model.routed = RoutedLayer()
+    server.sync_engine.model = model
+    server.sync_engine.scheduler.running.append(
+        SimpleNamespace(output_token_ids=[0, 1])
+    )
+
+    resp = await client.get("/v1/experts")
+
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["active"] is True
+    assert data["num_layers"] == 1
+    assert data["top_k"] == 2
+    assert data["total_tokens"] == 2
+    assert data["total_activations"] == 4
+    assert data["counts"] == [1, 2, 1, 0]
+    assert data["latest"] == {
+        "token_id": 1,
+        "routes": [{"layer": 0, "experts": [1, 2]}],
+    }
+
+
 # =====================================================================
 # Completions
 # =====================================================================
