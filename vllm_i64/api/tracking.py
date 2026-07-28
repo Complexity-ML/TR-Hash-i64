@@ -41,6 +41,49 @@ class UsageTracker:
         return total
 
 
+class ContextMetricsTracker:
+    """Aggregate rolling-context compression measurements."""
+
+    def __init__(self):
+        self._totals = {
+            "requests": 0,
+            "compressed_requests": 0,
+            "original_tokens": 0,
+            "prompt_tokens": 0,
+            "summary_tokens": 0,
+            "tokens_saved": 0,
+            "summarized_messages": 0,
+            "dropped_messages": 0,
+        }
+        self._last: Optional[dict] = None
+
+    def record(self, metrics: dict):
+        self._totals["requests"] += 1
+        if metrics.get("compressed"):
+            self._totals["compressed_requests"] += 1
+        for key in (
+            "original_tokens",
+            "prompt_tokens",
+            "summary_tokens",
+            "tokens_saved",
+            "summarized_messages",
+            "dropped_messages",
+        ):
+            self._totals[key] += int(metrics.get(key, 0))
+        self._last = dict(metrics)
+
+    def snapshot(self) -> dict:
+        totals = dict(self._totals)
+        original = totals["original_tokens"]
+        totals["compression_ratio"] = (
+            round(totals["prompt_tokens"] / original, 4)
+            if original > 0
+            else 1.0
+        )
+        totals["last"] = dict(self._last) if self._last is not None else None
+        return totals
+
+
 class RequestCache:
     """
     Request deduplication cache using OrderedDict for O(1) eviction.
@@ -151,6 +194,7 @@ class RequestLogger:
         error: Optional[str] = None,
         request_id: Optional[str] = None,
         partition: Optional[int] = None,
+        context_metrics: Optional[dict] = None,
     ):
         if not self.enabled:
             return
@@ -169,6 +213,20 @@ class RequestLogger:
             entry["request_id"] = request_id
         if error:
             entry["error"] = error
+        if context_metrics is not None:
+            entry["context"] = {
+                key: context_metrics.get(key)
+                for key in (
+                    "policy",
+                    "compressed",
+                    "original_tokens",
+                    "prompt_tokens",
+                    "summary_tokens",
+                    "tokens_saved",
+                    "summarized_messages",
+                    "dropped_messages",
+                )
+            }
         self._log.append(entry)
         self._json_logger.info(json.dumps(entry))
 

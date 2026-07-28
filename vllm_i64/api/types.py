@@ -54,13 +54,22 @@ class CompletionRequest:
     suppress_first_tokens: Optional[List[int]] = None
     user: Optional[str] = field(default=None)  # UUID for partition affinity; auto-generated if absent
 
-    def validate(self, max_seq_len: int = 2048) -> Optional[str]:
+    def validate(
+        self,
+        max_seq_len: int = 2048,
+        prompt_tokens: Optional[int] = None,
+    ) -> Optional[str]:
         if not self.prompt or not self.prompt.strip():
             return "prompt must not be empty"
         if self.max_tokens < 1:
             return "max_tokens must be >= 1"
         if self.max_tokens > max_seq_len:
             return f"max_tokens must be <= {max_seq_len}"
+        if prompt_tokens is not None and prompt_tokens + self.max_tokens > max_seq_len:
+            return (
+                f"prompt_tokens ({prompt_tokens}) + max_tokens ({self.max_tokens}) "
+                f"must be <= {max_seq_len}"
+            )
         if self.temperature < 0:
             return "temperature must be >= 0"
         if self.top_k < 0:
@@ -145,6 +154,8 @@ class CompletionResponse:
             d["usage"] = self._usage
         if hasattr(self, '_engine_metrics'):
             d["engine_metrics"] = self._engine_metrics
+        if hasattr(self, '_context_metrics'):
+            d["context_metrics"] = self._context_metrics
         return d
 
     def to_json(self) -> str:

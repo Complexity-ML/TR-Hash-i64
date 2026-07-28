@@ -54,7 +54,14 @@ from vllm_i64.api.middleware import (
     make_load_shed_middleware,
 )
 from vllm_i64.api.events import EventBus
-from vllm_i64.api.tracking import UsageTracker, RequestCache, LatencyTracker, RequestLogger, PriorityManager
+from vllm_i64.api.tracking import (
+    ContextMetricsTracker,
+    UsageTracker,
+    RequestCache,
+    LatencyTracker,
+    RequestLogger,
+    PriorityManager,
+)
 from vllm_i64.api.types import CompletionRequest, CompletionResponse  # noqa: F401 (re-export)
 from vllm_i64.api._helpers import HelpersMixin
 from vllm_i64.api._completions import CompletionsMixin
@@ -147,6 +154,7 @@ class I64Server(HelpersMixin, CompletionsMixin, AdminMixin, RAGMixin, AgentMixin
 
         # ── Trackers ─────────────────────────────────────────────────────
         self._usage_tracker = UsageTracker()
+        self._context_tracker = ContextMetricsTracker()
         self._request_cache = RequestCache()
         self._latency_tracker = LatencyTracker()
         self._request_logger = RequestLogger()

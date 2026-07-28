@@ -81,6 +81,47 @@ Useful endpoints:
 CORS is enabled so the two Hugging Face Space endpoints can be called by the
 Complexity website.
 
+### Rolling chat context
+
+`POST /v1/chat/completions` manages long conversations automatically. Before
+generation, the server measures the fully rendered prompt with the model's
+tokenizer and enforces:
+
+```text
+prompt_tokens + max_tokens <= max_seq_len
+```
+
+When the conversation does not fit, the server keeps system instructions and
+the two newest user turns, converts older turns into a deterministic extractive
+summary, then removes the oldest unrepresented messages. An oversized essential
+message is reduced to a head-and-tail view as a final fallback. This processing
+is local and does not trigger a second model request.
+
+Every non-streaming chat response includes `context_metrics`; streaming
+responses expose the same object in the first SSE event:
+
+```json
+{
+  "context_metrics": {
+    "policy": "rolling_summary",
+    "compressed": true,
+    "original_tokens": 3184,
+    "prompt_tokens": 1792,
+    "summary_tokens": 143,
+    "tokens_saved": 1392,
+    "retained_messages": 5,
+    "summarized_messages": 4,
+    "dropped_messages": 9
+  }
+}
+```
+
+Aggregate measurements are available under `context` in `GET /v1/metrics` and
+`GET /v1/monitor`. Send `"context_management": false` to disable compression
+for a request; an over-budget request is then rejected instead of shortened.
+Raw completions, batches and WebSocket completions always receive the same
+exact total-token validation.
+
 ## Verify
 
 ```bash

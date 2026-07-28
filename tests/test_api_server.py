@@ -270,6 +270,18 @@ async def test_completions_streaming(client):
     assert "[DONE]" in text
 
 
+@pytest.mark.asyncio
+async def test_completions_reject_exact_context_overflow(client):
+    """The prompt and requested output must jointly fit the model window."""
+    resp = await client.post("/v1/completions", json={
+        "prompt": "x" * 2040,
+        "max_tokens": 16,
+    })
+    assert resp.status == 400
+    data = await resp.json()
+    assert "prompt_tokens (2040) + max_tokens (16)" in data["error"]["message"]
+
+
 # =====================================================================
 # Chat Completions
 # =====================================================================
@@ -298,6 +310,77 @@ async def test_chat_completions_missing_messages(client):
     assert resp.status == 400
     data = await resp.json()
     assert "messages" in data["error"]["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_roll_old_context(client):
+    messages = [{"role": "system", "content": "Preserve this instruction."}]
+    for index in range(10):
+        messages.extend([
+            {"role": "user", "content": f"Question {index}: " + ("x" * 180)},
+            {"role": "assistant", "content": f"Answer {index}: " + ("y" * 180)},
+        ])
+
+    resp = await client.post("/v1/chat/completions", json={
+        "messages": messages,
+        "max_tokens": 64,
+    })
+
+    assert resp.status == 200
+    data = await resp.json()
+    metrics = data["context_metrics"]
+    assert metrics["policy"] == "rolling_summary"
+    assert metrics["compressed"] is True
+    assert metrics["prompt_tokens"] + metrics["reserved_output_tokens"] <= 2048
+    assert metrics["tokens_saved"] > 0
+    assert metrics["summarized_messages"] + metrics["dropped_messages"] > 0
+
+
+@pytest.mark.asyncio
+async def test_chat_context_management_can_be_disabled(client):
+    resp = await client.post("/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "x" * 2040}],
+        "max_tokens": 16,
+        "context_management": False,
+    })
+
+    assert resp.status == 400
+    data = await resp.json()
+    assert "prompt_tokens (2040) + max_tokens (16)" in data["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_exposes_context_metrics(client):
+    resp = await client.post("/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "Hello"}],
+        "max_tokens": 2,
+        "stream": True,
+    })
+
+    assert resp.status == 200
+    text = (await resp.read()).decode("utf-8")
+    first_event = next(
+        line.removeprefix("data: ")
+        for line in text.splitlines()
+        if line.startswith("data: {")
+    )
+    data = json.loads(first_event)
+    assert data["context_metrics"]["prompt_tokens"] == len("Hello")
+    assert data["context_metrics"]["compressed"] is False
+
+
+@pytest.mark.asyncio
+async def test_metrics_expose_context_aggregation(client):
+    await client.post("/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "Hello"}],
+        "max_tokens": 2,
+    })
+
+    resp = await client.get("/v1/metrics")
+    assert resp.status == 200
+    context = (await resp.json())["context"]
+    assert context["requests"] == 1
+    assert context["original_tokens"] == len("Hello")
 
 
 # =====================================================================

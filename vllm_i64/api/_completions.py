@@ -14,6 +14,7 @@ from typing import AsyncGenerator, Dict, List, Optional
 from aiohttp import web
 
 from vllm_i64.core.logging import get_logger
+from vllm_i64.core.context_manager import ContextWindowError
 from vllm_i64.api.types import CompletionRequest
 
 logger = get_logger("vllm_i64.server")
@@ -45,7 +46,9 @@ class CompletionsMixin:
         endpoint: str = "/v1/completions",
     ):
         t0 = time.monotonic()
-        prompt_ids = await self._tokenize_async(request.prompt)
+        prompt_ids = getattr(request, "_prompt_token_ids", None)
+        if prompt_ids is None:
+            prompt_ids = await self._tokenize_async(request.prompt)
         pixel_values = getattr(request, '_pixel_values', None)
         ns = self._cache_namespace(api_key)
 
@@ -66,6 +69,9 @@ class CompletionsMixin:
             )
 
         resp = self._build_response(result, prompt_ids)
+        context_metrics = getattr(request, "_context_metrics", None)
+        if context_metrics is not None:
+            resp._context_metrics = context_metrics
         latency_ms = (time.monotonic() - t0) * 1000
         from vllm_i64.api.types import compute_partition
         partition = compute_partition(api_key, getattr(request, "user", None))
@@ -75,11 +81,14 @@ class CompletionsMixin:
             endpoint=endpoint, status=200, latency_ms=latency_ms,
             prompt_tokens=len(prompt_ids), completion_tokens=len(result.output_tokens),
             api_key=api_key, request_id=resp.id, partition=partition,
+            context_metrics=context_metrics,
         )
         return resp
 
     async def _async_stream(self, request: CompletionRequest, api_key: Optional[str] = None) -> AsyncGenerator[str, None]:
-        prompt_ids = await self._tokenize_async(request.prompt)
+        prompt_ids = getattr(request, "_prompt_token_ids", None)
+        if prompt_ids is None:
+            prompt_ids = await self._tokenize_async(request.prompt)
         stream_id = self._next_request_id()
         created = int(time.time())
         output_ids: List[int] = []
@@ -110,12 +119,30 @@ class CompletionsMixin:
     async def _async_chat_stream(
         self, request: CompletionRequest, tools: Optional[list] = None, api_key: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
-        prompt_ids = await self._tokenize_async(request.prompt)
+        prompt_ids = getattr(request, "_prompt_token_ids", None)
+        if prompt_ids is None:
+            prompt_ids = await self._tokenize_async(request.prompt)
         stream_id = self._next_request_id()
         created = int(time.time())
         ns = self._cache_namespace(api_key)
 
-        yield f"data: {json.dumps({'id': stream_id, 'object': 'chat.completion.chunk', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'role': 'assistant', 'content': ''}, 'finish_reason': None}]})}\n\n"
+        initial_chunk = {
+            "id": stream_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": self.model_name,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": ""},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        context_metrics = getattr(request, "_context_metrics", None)
+        if context_metrics is not None:
+            initial_chunk["context_metrics"] = context_metrics
+        yield f"data: {json.dumps(initial_chunk)}\n\n"
 
         output_ids: List[int] = []
         prev_text = ""
@@ -183,9 +210,15 @@ class CompletionsMixin:
             priority=body.get("priority", 0),
             suppress_first_tokens=self._space_suppress_ids,
         )
-        error = req.validate(max_seq_len=self.sync_engine.scheduler.max_seq_len)
+        max_seq_len = self.sync_engine.scheduler.max_seq_len
+        error = req.validate(max_seq_len=max_seq_len)
         if error:
             return web.json_response({"error": {"message": error, "type": "invalid_request_error"}}, status=400)
+        prompt_ids = await self._tokenize_async(req.prompt)
+        error = req.validate(max_seq_len=max_seq_len, prompt_tokens=len(prompt_ids))
+        if error:
+            return web.json_response({"error": {"message": error, "type": "invalid_request_error"}}, status=400)
+        req._prompt_token_ids = prompt_ids
 
         auth = request.headers.get("Authorization", "")
         req_api_key = auth[7:] if auth.startswith("Bearer ") else None
@@ -239,13 +272,12 @@ class CompletionsMixin:
         if not messages:
             return web.json_response({"error": {"message": "Missing 'messages'", "type": "invalid_request_error"}}, status=400)
 
-        prompt = self._apply_chat_template(messages)
-
         images = self._extract_images_from_messages(messages)
         pixel_values = None
         if images:
             pixel_values = self._preprocess_images(images)
 
+        context_messages = list(messages)
         if body.get("rag") and self.rag_enabled and self.retriever is not None:
             user_query = messages[-1].get("content", "")
             if isinstance(user_query, list):
@@ -253,11 +285,56 @@ class CompletionsMixin:
             if user_query:
                 context = self.retriever.get_context(user_query, k=body.get("rag_k", 3))
                 if context:
-                    prompt = f"Context:\n{context}\n\n{prompt}"
+                    context_messages = [
+                        {
+                            "role": "system",
+                            "content": f"Retrieved context for this request:\n{context}",
+                        },
+                        *context_messages,
+                    ]
+
+        max_tokens = body.get("max_tokens", 256)
+        max_seq_len = self.sync_engine.scheduler.max_seq_len
+        context_management = body.get("context_management", "auto")
+        context_enabled = context_management not in (False, None, "disabled", "off", "none")
+        try:
+            if context_enabled:
+                context_plan = await self._prepare_chat_context(
+                    context_messages,
+                    max_output_tokens=max_tokens,
+                    max_seq_len=max_seq_len,
+                )
+                prompt = context_plan.prompt
+                prompt_ids = context_plan.prompt_token_ids
+                context_metrics = context_plan.to_metrics()
+                context_metrics["policy"] = "rolling_summary"
+            else:
+                prompt = self._apply_chat_template(context_messages)
+                prompt_ids = await self._tokenize_async(prompt)
+                context_metrics = {
+                    "compressed": False,
+                    "policy": "disabled",
+                    "max_seq_len": max_seq_len,
+                    "reserved_output_tokens": max_tokens,
+                    "available_prompt_tokens": max_seq_len - max_tokens,
+                    "original_messages": len(context_messages),
+                    "retained_messages": len(context_messages),
+                    "summarized_messages": 0,
+                    "dropped_messages": 0,
+                    "original_tokens": len(prompt_ids),
+                    "prompt_tokens": len(prompt_ids),
+                    "summary_tokens": 0,
+                    "tokens_saved": 0,
+                }
+        except ContextWindowError as exc:
+            return web.json_response(
+                {"error": {"message": str(exc), "type": "invalid_request_error"}},
+                status=400,
+            )
 
         req = CompletionRequest(
             prompt=prompt,
-            max_tokens=body.get("max_tokens", 256),
+            max_tokens=max_tokens,
             temperature=body.get("temperature", 0.8),
             top_k=body.get("top_k", 50),
             top_p=body.get("top_p", 0.9),
@@ -279,10 +356,13 @@ class CompletionsMixin:
             suppress_first_tokens=self._space_suppress_ids,
         )
         req._pixel_values = pixel_values
+        req._prompt_token_ids = prompt_ids
+        req._context_metrics = context_metrics
 
-        error = req.validate(max_seq_len=self.sync_engine.scheduler.max_seq_len)
+        error = req.validate(max_seq_len=max_seq_len, prompt_tokens=len(prompt_ids))
         if error:
             return web.json_response({"error": {"message": error, "type": "invalid_request_error"}}, status=400)
+        self._context_tracker.record(context_metrics)
 
         auth = request.headers.get("Authorization", "")
         req_api_key = auth[7:] if auth.startswith("Bearer ") else None
@@ -297,7 +377,6 @@ class CompletionsMixin:
                 try:
                     async for chunk in gen:
                         await response.write(chunk.encode())
-                        await response.drain()
                 except (ConnectionResetError, ConnectionError):
                     await gen.aclose()
                 return response

@@ -223,9 +223,15 @@ class AdminMixin:
                 presence_penalty=rd.get("presence_penalty", 0.0),
                 suppress_first_tokens=self._space_suppress_ids,
             )
-            error = req.validate(max_seq_len=self.sync_engine.scheduler.max_seq_len)
+            max_seq_len = self.sync_engine.scheduler.max_seq_len
+            error = req.validate(max_seq_len=max_seq_len)
             if error:
                 return web.json_response({"error": {"message": f"Request {i}: {error}", "type": "invalid_request_error"}}, status=400)
+            prompt_ids = await self._tokenize_async(prompt)
+            error = req.validate(max_seq_len=max_seq_len, prompt_tokens=len(prompt_ids))
+            if error:
+                return web.json_response({"error": {"message": f"Request {i}: {error}", "type": "invalid_request_error"}}, status=400)
+            req._prompt_token_ids = prompt_ids
             completion_reqs.append(req)
         results = await asyncio.gather(
             *[self._async_complete(r, api_key=req_api_key, endpoint="/v1/batch") for r in completion_reqs],
@@ -271,6 +277,7 @@ class AdminMixin:
         return web.json_response({
             "latency": self._latency_tracker.get_all_endpoints(),
             "usage": self._usage_tracker.get_total(),
+            "context": self._context_tracker.snapshot(),
             "cache": self._request_cache.hit_rate_info,
             "uptime_seconds": int(time.monotonic() - self._start_time),
             "requests_served": self.request_counter,
@@ -335,13 +342,18 @@ class AdminMixin:
                     top_p=body.get("top_p", 0.9), stream=True,
                     suppress_first_tokens=self._space_suppress_ids,
                 )
-                error = req.validate(max_seq_len=self.sync_engine.scheduler.max_seq_len)
+                max_seq_len = self.sync_engine.scheduler.max_seq_len
+                error = req.validate(max_seq_len=max_seq_len)
+                if error:
+                    await ws.send_json({"error": {"message": error, "type": "invalid_request_error"}})
+                    continue
+                prompt_ids = await self._tokenize_async(prompt)
+                error = req.validate(max_seq_len=max_seq_len, prompt_tokens=len(prompt_ids))
                 if error:
                     await ws.send_json({"error": {"message": error, "type": "invalid_request_error"}})
                     continue
                 stream_id = self._next_request_id()
                 created = int(time.time())
-                prompt_ids = self._tokenize(prompt)
                 try:
                     output_ids: List[int] = []
                     prev_text = ""
@@ -424,6 +436,7 @@ class AdminMixin:
             "peak_batch_size": self.async_engine.peak_batch_size,
             "scheduler": engine.scheduler.get_stats(),
             "engine": {"total_steps": engine.total_steps, "total_tokens_generated": engine.total_tokens_generated},
+            "context": self._context_tracker.snapshot(),
         }
         if engine.kv_cache is not None:
             kv = engine.kv_cache.get_stats()

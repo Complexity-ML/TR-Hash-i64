@@ -13,6 +13,7 @@ from typing import Dict, List, Optional
 from aiohttp import web
 
 from vllm_i64.core.logging import get_logger
+from vllm_i64.core.context_manager import ContextManager, ContextPlan
 from vllm_i64.api.types import CompletionResponse
 from vllm_i64.engine.i64_engine import GenerationResult
 
@@ -103,12 +104,13 @@ class HelpersMixin:
     # Chat template
     # ------------------------------------------------------------------
 
-    def _apply_chat_template(self, messages: List[Dict]) -> str:
-        normalized = [
+    def _normalize_chat_messages(self, messages: List[Dict]) -> List[Dict[str, str]]:
+        return [
             {"role": m.get("role", "user"), "content": self._extract_content_text(m.get("content", ""))}
             for m in messages
         ]
 
+    def _render_chat_template(self, normalized: List[Dict[str, str]]) -> str:
         if self.chat_template:
             from jinja2 import Template
             prompt = Template(self.chat_template).render(messages=normalized, add_generation_prompt=True)
@@ -127,6 +129,41 @@ class HelpersMixin:
 
         # Pre-train model — raw concat
         return "".join(m.get("content", "") for m in normalized)
+
+    def _apply_chat_template(self, messages: List[Dict]) -> str:
+        return self._render_chat_template(self._normalize_chat_messages(messages))
+
+    def _prepare_chat_context_sync(
+        self,
+        messages: List[Dict],
+        max_output_tokens: int,
+        max_seq_len: int,
+    ) -> ContextPlan:
+        manager = ContextManager(
+            encode=self._tokenize,
+            decode=self._detokenize,
+            render=self._render_chat_template,
+            max_seq_len=max_seq_len,
+        )
+        return manager.fit(
+            self._normalize_chat_messages(messages),
+            max_output_tokens=max_output_tokens,
+        )
+
+    async def _prepare_chat_context(
+        self,
+        messages: List[Dict],
+        max_output_tokens: int,
+        max_seq_len: int,
+    ) -> ContextPlan:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._tokenize_pool,
+            self._prepare_chat_context_sync,
+            messages,
+            max_output_tokens,
+            max_seq_len,
+        )
 
     @staticmethod
     def _chat_stop_sequences(user_stop: Optional[List[str]] = None) -> List[str]:
