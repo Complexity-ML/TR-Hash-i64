@@ -2,7 +2,7 @@
 # Integer-first inference for token-routed models
 #
 # Build:  docker build -t vllm-i64 .
-# Run:    docker run --gpus all -p 8000:8000 vllm-i64 serve pacific-prime-chat
+# Run:    docker run --gpus all -p 8000:8000 vllm-i64 serve tr-moe-306
 
 FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS builder
 
@@ -51,4 +51,4 @@ ENV PYTHONPATH=/app
 EXPOSE 8000
 
 ENTRYPOINT ["python3", "-m", "vllm_i64.cli"]
-CMD ["serve", "pacific-prime-chat", "--port", "8000"]
+CMD ["serve", "tr-moe-306", "--port", "8000", "--quantization", "none"]

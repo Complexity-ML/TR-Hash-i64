@@ -12,4 +12,4 @@ The philosophy: integers everywhere, float only where math requires it.
 INL - 2025
 """
 
-__version__ = "0.2.0-mu-fix"
+__version__ = "0.3.0"

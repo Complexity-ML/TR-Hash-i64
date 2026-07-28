@@ -98,7 +98,7 @@ def cmd_serve(args):
     import torch
     from vllm_i64.core.logging import setup_logging
     setup_logging(level="INFO", json_output=getattr(args, 'log_json', False))
-    from vllm_i64.core.loader import load_model_by_name
+    from vllm_i64.core.loader import load_model_by_name, resolve_checkpoint_source
     from vllm_i64.engine.i64_engine import I64Engine
     from vllm_i64.cpu.engine import CPUEngine
     from vllm_i64.api.server import I64Server
@@ -113,20 +113,37 @@ def cmd_serve(args):
     if device == "cpu" and dtype in (torch.float16, torch.bfloat16):
         _logger.info("CPU detected — overriding %s to float32", dtype)
         dtype = torch.float32
+    if device == "cpu":
+        import os
 
-    # INT8 on CPU is slower than float32 — quantize/dequant overhead per layer kills throughput
-    if device == "cpu" and args.quantization == "int8":
-        _logger.info("CPU detected — disabling INT8 quantization (float32 is faster)")
-        args.quantization = "none"
+        try:
+            available_cpus = len(os.sched_getaffinity(0))
+        except AttributeError:
+            available_cpus = os.cpu_count() or 1
+        cpu_threads = int(
+            os.environ.get("VLLM_I64_CPU_THREADS", available_cpus)
+        )
+        torch.set_num_threads(max(1, min(cpu_threads, available_cpus)))
+        try:
+            torch.set_num_interop_threads(1)
+        except RuntimeError:
+            pass
+        _logger.info(
+            "CPU thread pool: %d intra-op, 1 inter-op",
+            torch.get_num_threads(),
+        )
 
     entry = get_model_entry(args.model)
+    resolved_checkpoint = resolve_checkpoint_source(
+        args.checkpoint or entry.checkpoint
+    )
     _logger.info("vllm-i64 :: serving %s", args.model)
     _logger.info("host=%s port=%d dtype=%s device=%s", args.host, args.port, dtype, device)
 
     # Load model
     model = load_model_by_name(
         args.model, dtype=dtype, device=device,
-        checkpoint_override=args.checkpoint,
+        checkpoint_override=resolved_checkpoint,
         quantization=args.quantization,
     )
     model.eval()
@@ -142,9 +159,9 @@ def cmd_serve(args):
 
     # Load tokenizer (from checkpoint dir if overridden, search up 3 parent dirs)
     tokenizer = None
-    if args.checkpoint:
+    if resolved_checkpoint:
         import os
-        search_dir = args.checkpoint
+        search_dir = resolved_checkpoint
         for _ in range(4):  # checkpoint, parent, grandparent, great-grandparent
             tok_path = os.path.join(search_dir, "tokenizer.json")
             if os.path.exists(tok_path):
@@ -157,7 +174,9 @@ def cmd_serve(args):
                 break
             search_dir = parent
     if tokenizer is None:
-        tokenizer = load_tokenizer(args.model)
+        tokenizer = load_tokenizer(
+            args.model, checkpoint_path=resolved_checkpoint
+        )
 
     # Load chat template (explicit path or auto-detect from checkpoint dir)
     chat_template = None
@@ -166,7 +185,7 @@ def cmd_serve(args):
             chat_template = f.read()
     else:
         import os
-        ckpt_path = args.checkpoint or entry.checkpoint
+        ckpt_path = resolved_checkpoint
         if ckpt_path:
             search_dir = os.path.dirname(ckpt_path) if os.path.isfile(ckpt_path) else ckpt_path
             for _ in range(4):  # checkpoint, parent, grandparent, great-grandparent
@@ -469,16 +488,16 @@ def main():
     # serve
     p_serve = sub.add_parser("serve", help="Start inference server")
     p_serve.add_argument("model", nargs="?", default=None,
-                         help="Model name (e.g. pacific-prime-chat). "
+                         help="Model name (tr-moe-306 or dense-306). "
                               "Optional if --no-model is used for sandbox-only mode")
     p_serve.add_argument("--host", default="0.0.0.0")
     p_serve.add_argument("--port", type=int, default=8000)
     p_serve.add_argument("--dtype", default="float16", choices=["float16", "bfloat16", "float32"])
     p_serve.add_argument("--tp", type=int, default=1, help="Tensor parallel size (num GPUs)")
     p_serve.add_argument("--pp", type=int, default=1, help="Pipeline parallel size (num stages)")
-    p_serve.add_argument("--quantization", default="int8",
+    p_serve.add_argument("--quantization", default="none",
                          choices=["int8", "int4", "awq", "gptq", "none"],
-                         help="Weight quantization (default: int8 — native integer compute; "
+                         help="Weight quantization (default: none for checkpoint fidelity; "
                               "awq/gptq for pre-quantized HF checkpoints)")
     p_serve.add_argument("--checkpoint", default=None, help="Override checkpoint path")
     p_serve.add_argument("--chat-template", default=None, help="Path to chat template")

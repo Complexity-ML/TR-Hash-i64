@@ -165,25 +165,31 @@ class I64Tokenizer:
         )
 
 
-def load_tokenizer(model_name: str) -> Optional[I64Tokenizer]:
+def load_tokenizer(
+    model_name: str,
+    checkpoint_path: Optional[str] = None,
+) -> Optional[I64Tokenizer]:
     """
     Load tokenizer for a registered model.
 
     Looks for tokenizer.json in the checkpoint directory.
     """
     entry = get_model_entry(model_name)
-    if not entry.config_path:
+    source = checkpoint_path or entry.config_path or entry.checkpoint
+    if not source:
         return None
 
-    # Look for tokenizer.json next to config.json
-    config_dir = os.path.dirname(entry.config_path)
+    from vllm_i64.core.loader import resolve_checkpoint_source
+
+    source = resolve_checkpoint_source(source)
+    config_dir = source if os.path.isdir(source) else os.path.dirname(source)
     tokenizer_path = os.path.join(config_dir, "tokenizer.json")
 
     if os.path.exists(tokenizer_path):
         logger.info("Tokenizer: %s", tokenizer_path)
         return I64Tokenizer(tokenizer_path)
 
-    # Try parent directory
+    # Compatibility fallback for checkpoints nested under a converted folder.
     parent_tokenizer = os.path.join(os.path.dirname(config_dir), "tokenizer.json")
     if os.path.exists(parent_tokenizer):
         logger.info("Tokenizer: %s", parent_tokenizer)

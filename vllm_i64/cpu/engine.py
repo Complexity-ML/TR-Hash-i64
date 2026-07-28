@@ -119,6 +119,9 @@ class CPUEngine(I64Engine):
                 valid_indices.append(i)
             tokens_per_seq = [batch.tokens_per_request[i] for i in valid_indices]
 
+        # ``step()`` mutates scheduler and cache tensors after forward. Using
+        # torch.inference_mode() here would tag returned logits as inference
+        # tensors and make those downstream in-place updates illegal.
         with torch.no_grad():
             logits = self.model(
                 token_ids=token_ids,

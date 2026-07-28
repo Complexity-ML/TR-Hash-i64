@@ -169,6 +169,15 @@ class TestDenseSwiGLUMLP:
         out = mlp(x)
         assert out.shape == (2, 10, 128)
 
+    def test_gate_up_fusion_preserves_output(self, dense_config):
+        mlp = DenseSwiGLUMLP(dense_config).eval()
+        x = torch.randn(7, 128)
+        with torch.inference_mode():
+            expected = mlp(x)
+            assert mlp.fuse_gate_up() is True
+            actual = mlp(x)
+        assert torch.allclose(expected, actual, atol=1e-6, rtol=1e-5)
+
 
 # ── MoE MLP ──
 
@@ -185,6 +194,35 @@ class TestMoEMLP:
         x = torch.randn(1, 5, 128)
         out = mlp(x, token_ids=None)
         assert out.shape == (1, 5, 128)
+
+    def test_top2_routes_are_distinct_and_weighted(self, moe_config):
+        moe_config.top_k = 2
+        moe_config.top_k_primary_weight = 0.5
+        mlp = MoEMLP(moe_config).tr_mlp
+        token_ids = torch.tensor([1, 2, 3])
+        routes = mlp.route(token_ids, 3, token_ids.device)
+        assert routes.shape == (2, 3)
+        assert torch.equal(routes[1], (routes[0] + 1) % moe_config.num_experts)
+
+    def test_shared_gate_up_fusion_preserves_output(self, moe_config):
+        mlp = MoEMLP(moe_config).tr_mlp.eval()
+        x = torch.randn(7, 128)
+        token_ids = torch.arange(7)
+        with torch.inference_mode():
+            expected = mlp(x, token_ids=token_ids)
+            assert mlp.fuse_shared_gate_up() is True
+            actual = mlp(x, token_ids=token_ids)
+        assert torch.allclose(expected, actual, atol=1e-6, rtol=1e-5)
+
+    def test_expert_linear_materialization_preserves_output(self, moe_config):
+        mlp = MoEMLP(moe_config).tr_mlp.eval()
+        x = torch.randn(7, 128)
+        token_ids = torch.arange(7)
+        with torch.inference_mode():
+            expected = mlp(x, token_ids=token_ids)
+            assert mlp.materialize_expert_linears() is True
+            actual = mlp(x, token_ids=token_ids)
+        assert torch.allclose(expected, actual, atol=1e-6, rtol=1e-5)
 
 
 # ── Decoder Layer ──

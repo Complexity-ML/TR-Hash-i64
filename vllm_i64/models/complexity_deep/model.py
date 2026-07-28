@@ -46,8 +46,8 @@ def _rotate_half(x):
 
 def apply_rotary(x, cos, sin):
     """x: [N, heads, head_dim], cos/sin: [N, head_dim]."""
-    cos = cos.unsqueeze(1)  # [N, 1, head_dim]
-    sin = sin.unsqueeze(1)
+    cos = cos.to(dtype=x.dtype).unsqueeze(1)  # [N, 1, head_dim]
+    sin = sin.to(dtype=x.dtype).unsqueeze(1)
     return (x * cos) + (_rotate_half(x) * sin)
 
 
@@ -85,9 +85,20 @@ class Attention(nn.Module):
         self.v_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
 
-        self.mu_to_q = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
-        self.mu_to_k = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
-        self.mu_to_v = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
+        self.use_mu_guidance = (
+            getattr(config, "use_mu_guidance", False)
+            and not getattr(config, "disable_mu_guidance", False)
+        )
+        if self.use_mu_guidance:
+            self.mu_to_q = nn.Linear(
+                self.hidden_size, self.num_heads * self.head_dim, bias=False
+            )
+            self.mu_to_k = nn.Linear(
+                self.hidden_size, self.num_kv_heads * self.head_dim, bias=False
+            )
+            self.mu_to_v = nn.Linear(
+                self.hidden_size, self.num_kv_heads * self.head_dim, bias=False
+            )
 
         self.use_qk_norm = getattr(config, 'use_qk_norm', False)
         if self.use_qk_norm:
@@ -99,6 +110,39 @@ class Attention(nn.Module):
             max_seq_len=getattr(config, 'max_position_embeddings', 4096),
             theta=getattr(config, 'rope_theta', 10000.0),
         )
+
+    def fuse_qkv(self) -> bool:
+        """Fuse three input projections into one CPU-friendly linear layer."""
+
+        if hasattr(self, "qkv_proj"):
+            return False
+        q_out = self.q_proj.out_features
+        k_out = self.k_proj.out_features
+        v_out = self.v_proj.out_features
+        fused = nn.Linear(
+            self.hidden_size,
+            q_out + k_out + v_out,
+            bias=False,
+            device=self.q_proj.weight.device,
+            dtype=self.q_proj.weight.dtype,
+        )
+        with torch.no_grad():
+            fused.weight.copy_(
+                torch.cat(
+                    [
+                        self.q_proj.weight,
+                        self.k_proj.weight,
+                        self.v_proj.weight,
+                    ],
+                    dim=0,
+                )
+            )
+        self.qkv_splits = (q_out, k_out, v_out)
+        self.qkv_proj = fused
+        del self.q_proj
+        del self.k_proj
+        del self.v_proj
+        return True
 
     def forward(self, hidden, positions, mu_prev=None,
                 kv_cache=None, layer_idx=0,
@@ -113,11 +157,14 @@ class Attention(nn.Module):
         """
         bsz = hidden.shape[0]
 
-        q = self.q_proj(hidden)
-        k = self.k_proj(hidden)
-        v = self.v_proj(hidden)
+        if hasattr(self, "qkv_proj"):
+            q, k, v = self.qkv_proj(hidden).split(self.qkv_splits, dim=-1)
+        else:
+            q = self.q_proj(hidden)
+            k = self.k_proj(hidden)
+            v = self.v_proj(hidden)
 
-        if mu_prev is not None:
+        if self.use_mu_guidance and mu_prev is not None:
             q = q + self.mu_to_q(mu_prev)
             k = k + self.mu_to_k(mu_prev)
             v = v + self.mu_to_v(mu_prev)
@@ -150,7 +197,7 @@ class Attention(nn.Module):
         else:
             out = naive_varlen_attention(q, k, v, tps, self.num_kv_groups, softmax_scale=scale)
 
-        out = out.reshape(bsz, self.num_heads * self.head_dim)
+        out = out.to(q.dtype).reshape(bsz, self.num_heads * self.head_dim)
         return self.o_proj(out)
 
     def _cached_attention(self, q, k, v, kv_cache, layer_idx, seq_ids, tokens_per_seq, positions):
@@ -185,7 +232,7 @@ class Attention(nn.Module):
             offset += n
 
         out = torch.cat(outputs, dim=0)
-        out = out.reshape(bsz, self.num_heads * self.head_dim)
+        out = out.to(q.dtype).reshape(bsz, self.num_heads * self.head_dim)
         return self.o_proj(out)
 
 
@@ -201,7 +248,32 @@ class DenseSwiGLUMLP(nn.Module):
         self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
 
     def forward(self, x, token_ids=None, **kwargs):
-        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+        if hasattr(self, "gate_up_proj"):
+            gate, up = self.gate_up_proj(x).chunk(2, dim=-1)
+        else:
+            gate, up = self.gate_proj(x), self.up_proj(x)
+        return self.down_proj(F.silu(gate) * up)
+
+    def fuse_gate_up(self) -> bool:
+        """Fuse SwiGLU input projections after checkpoint loading."""
+
+        if hasattr(self, "gate_up_proj"):
+            return False
+        fused = nn.Linear(
+            self.gate_proj.in_features,
+            self.gate_proj.out_features + self.up_proj.out_features,
+            bias=False,
+            device=self.gate_proj.weight.device,
+            dtype=self.gate_proj.weight.dtype,
+        )
+        with torch.no_grad():
+            fused.weight.copy_(
+                torch.cat([self.gate_proj.weight, self.up_proj.weight], dim=0)
+            )
+        self.gate_up_proj = fused
+        del self.gate_proj
+        del self.up_proj
+        return True
 
 
 # =========================================================================
@@ -218,6 +290,11 @@ class MoEMLP(nn.Module):
             vocab_size=config.vocab_size,
             shared_expert=getattr(config, 'shared_expert', False),
             shared_intermediate_size=getattr(config, 'shared_intermediate_size', None) or 0,
+            top_k=getattr(config, 'top_k', 1),
+            top_k_primary_weight=getattr(config, 'top_k_primary_weight', None),
+            use_shared_routed_gates=getattr(config, 'use_shared_routed_gates', False),
+            shared_gate_init=getattr(config, 'shared_gate_init', 1.0),
+            routed_gate_init=getattr(config, 'routed_gate_init', 1.0),
         )
 
     def forward(self, x, token_ids=None, **kwargs):
@@ -236,7 +313,28 @@ class ComplexityDecoderLayer(nn.Module):
         self.post_attention_layernorm = nn.RMSNorm(config.hidden_size, eps=getattr(config, 'rms_norm_eps', 1e-6))
 
         if config.num_experts > 1 and getattr(config, 'use_token_routed_mlp', True):
-            self.mlp = MoEMLP(config)
+            # Keep checkpoint keys as ``layers.N.mlp.*``. The old wrapper
+            # inserted an artificial ``tr_mlp`` segment and left the real
+            # exported expert tensors unloaded.
+            self.mlp = TokenRoutedMLP(
+                hidden_size=config.hidden_size,
+                intermediate_size=config.intermediate_size,
+                num_experts=config.num_experts,
+                vocab_size=config.vocab_size,
+                shared_expert=getattr(config, 'shared_expert', False),
+                shared_intermediate_size=getattr(
+                    config, 'shared_intermediate_size', None
+                ) or 0,
+                top_k=getattr(config, 'top_k', 1),
+                top_k_primary_weight=getattr(
+                    config, 'top_k_primary_weight', None
+                ),
+                use_shared_routed_gates=getattr(
+                    config, 'use_shared_routed_gates', False
+                ),
+                shared_gate_init=getattr(config, 'shared_gate_init', 1.0),
+                routed_gate_init=getattr(config, 'routed_gate_init', 1.0),
+            )
         else:
             self.mlp = DenseSwiGLUMLP(config)
 
@@ -346,14 +444,6 @@ class ComplexityDeepModel(nn.Module):
         mapped = {}
         for k, v in state_dict.items():
             new_key = k
-            for proj in ("gate_proj_w", "up_proj_w", "down_proj_w", "token_to_expert"):
-                if f"mlp.{proj}" in new_key and "tr_mlp" not in new_key:
-                    new_key = new_key.replace(f"mlp.{proj}", f"mlp.tr_mlp.{proj}")
-                    break
-            for proj in ("shared_gate", "shared_up", "shared_down"):
-                if f"mlp.{proj}" in new_key and "tr_mlp" not in new_key:
-                    new_key = new_key.replace(f"mlp.{proj}", f"mlp.tr_mlp.{proj}")
-                    break
             # rotary_emb -> rope
             new_key = new_key.replace("self_attn.rotary_emb.", "self_attn.rope.")
             mapped[new_key] = v

@@ -83,6 +83,38 @@ class TestComplexityDeepConfig:
         finally:
             os.unlink(path)
 
+    def test_top2_and_output_gates_from_json(self):
+        data = {
+            "mlp_type": "token_routed",
+            "num_experts": 4,
+            "top_k": 2,
+            "top_k_primary_weight": 0.5,
+            "use_shared_routed_gates": True,
+            "shared_gate_init": 0.5,
+            "routed_gate_init": 0.5,
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(data, f)
+            path = f.name
+
+        try:
+            config = ComplexityDeepConfig.from_json(path)
+            assert config.top_k == 2
+            assert config.top_k_primary_weight == 0.5
+            assert config.use_shared_routed_gates is True
+        finally:
+            os.unlink(path)
+
+
+class TestPublicRegistry:
+    def test_only_matched_306m_pair_is_public(self):
+        from vllm_i64.core.registry import list_models
+
+        assert [item["name"] for item in list_models()] == [
+            "tr-moe-306",
+            "dense-306",
+        ]
+
 
 class TestGetModuleForParam:
     def test_finds_linear(self):

@@ -31,6 +31,69 @@ from vllm_i64.parallel.tensor_parallel import (
 logger = logging.getLogger("vllm_i64.loader")
 
 
+def resolve_checkpoint_source(source: str) -> str:
+    """Resolve a local path or download a Hugging Face model repository."""
+
+    local = Path(source).expanduser()
+    if local.exists():
+        return str(local.resolve())
+    if source.count("/") != 1:
+        raise FileNotFoundError(f"Checkpoint not found: {source}")
+
+    from huggingface_hub import snapshot_download
+
+    logger.info("Downloading Hugging Face model: %s", source)
+    return snapshot_download(
+        repo_id=source,
+        allow_patterns=[
+            "*.json",
+            "*.safetensors",
+            "*.jinja",
+            "*.j2",
+        ],
+    )
+
+
+def _quantize_cpu_dynamic(model: nn.Module) -> nn.Module:
+    """Pack ``nn.Linear`` weights as INT8 using the Linux x86 CPU backend."""
+
+    engines = torch.backends.quantized.supported_engines
+    engine = "x86" if "x86" in engines else "fbgemm" if "fbgemm" in engines else None
+    if engine is None:
+        raise RuntimeError(
+            "CPU INT8 requires the x86 or FBGEMM PyTorch quantization backend; "
+            f"available backends: {engines}"
+        )
+
+    torch.backends.quantized.engine = engine
+    model.eval()
+    logger.info("CPU dynamic INT8: packing nn.Linear weights with %s", engine)
+    return torch.ao.quantization.quantize_dynamic(
+        model,
+        {nn.Linear},
+        dtype=torch.qint8,
+        inplace=False,
+    )
+
+
+def _fuse_cpu_projection_layers(model: nn.Module) -> int:
+    """Apply inference-only projection fusion after all weights are loaded."""
+
+    fused = 0
+    for module in list(model.modules()):
+        for method_name in (
+            "fuse_qkv",
+            "fuse_gate_up",
+            "fuse_shared_gate_up",
+            "materialize_expert_linears",
+        ):
+            method = getattr(module, method_name, None)
+            if method is not None and method():
+                fused += 1
+    logger.info("CPU projection fusion: %d modules", fused)
+    return fused
+
+
 # =========================================================================
 # Multi-format state_dict loading (safetensors + PyTorch)
 # =========================================================================
@@ -130,19 +193,16 @@ def _convert_framework_weights(state_dict: Dict[str, torch.Tensor]) -> Dict[str,
     """
     Convert complexity-framework checkpoint format to vllm-i64 format.
 
-    Handles:
-    1. Separate expert weights (experts.0.gate_proj + experts.0.up_proj → fused gate_up_proj)
-    2. Dense MLP (mlp.gate_proj + mlp.up_proj → fused gate_up_proj with 1 expert)
-    3. INL dynamics controller format (controller.0/2 → controller_in/out)
-    4. token_to_expert buffer
+    The public 306.5M exports are already native and pass through unchanged.
+    Only the older ``mlp.experts.N`` layout still requires conversion.
     """
     import re
 
-    # Detect framework format: look for "mlp.experts.0.gate_proj" or "mlp.gate_proj"
+    # Dense-306 intentionally keeps regular gate/up/down projections. Treating
+    # it as an expert of size one changes both names and execution semantics.
     has_separate_experts = any("mlp.experts." in k and "gate_proj" in k for k in state_dict)
-    has_dense_mlp = any(re.match(r"layers\.\d+\.mlp\.gate_proj", k) for k in state_dict)
 
-    if not has_separate_experts and not has_dense_mlp:
+    if not has_separate_experts:
         return state_dict  # Already in vllm-i64 format or unknown
 
     logger.info("Detected complexity-framework format, converting weights...")
@@ -157,16 +217,6 @@ def _convert_framework_weights(state_dict: Dict[str, torch.Tensor]) -> Dict[str,
         if m:
             layer_prefix, expert_id, proj_type = m.group(1), int(m.group(2)), m.group(3)
             key = (layer_prefix, expert_id)
-            if key not in expert_weights:
-                expert_weights[key] = {}
-            expert_weights[key][proj_type] = tensor
-            continue
-
-        # Dense MLP: layers.X.mlp.{gate,up,down}_proj.weight
-        m = re.match(r"(layers\.\d+)\.mlp\.(gate_proj|up_proj|down_proj)\.weight", name)
-        if m:
-            layer_prefix, proj_type = m.group(1), m.group(2)
-            key = (layer_prefix, 0)  # Single expert = expert 0
             if key not in expert_weights:
                 expert_weights[key] = {}
             expert_weights[key][proj_type] = tensor
@@ -274,6 +324,7 @@ def load_checkpoint(
         dict with loading stats
     """
     tp = get_tp()
+    checkpoint_path = resolve_checkpoint_source(checkpoint_path)
     path = Path(checkpoint_path)
     if not path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
@@ -295,9 +346,10 @@ def load_checkpoint(
     skipped = set()
     missing = set()
 
-    # Collect expert weight pairs for MLP sharding
-    expert_gate_up = {}  # layer_prefix → tensor
-    expert_down = {}     # layer_prefix → tensor
+    # Collect native expert weights for TP sharding
+    expert_gate = {}
+    expert_up = {}
+    expert_down_native = {}
 
     for name, weight in state_dict.items():
         # Skip rotary inv_freq (computed at init)
@@ -367,17 +419,21 @@ def load_checkpoint(
             loaded.add(name)
             loaded_params.add(resolved_name)
 
-        elif "gate_up_proj" in resolved_name and "mlp" in resolved_name:
-            # Expert MLP gate_up — collect for paired sharding
-            prefix = resolved_name.rsplit("gate_up_proj", 1)[0]
-            expert_gate_up[prefix] = weight
+        elif "gate_proj_w" in resolved_name and "mlp" in resolved_name:
+            prefix = resolved_name.rsplit("gate_proj_w", 1)[0]
+            expert_gate[prefix] = weight
             loaded.add(name)
             loaded_params.add(resolved_name)
 
-        elif "down_proj" in resolved_name and "mlp" in resolved_name:
-            # Expert MLP down — collect for paired sharding
-            prefix = resolved_name.rsplit("down_proj", 1)[0]
-            expert_down[prefix] = weight
+        elif "up_proj_w" in resolved_name and "mlp" in resolved_name:
+            prefix = resolved_name.rsplit("up_proj_w", 1)[0]
+            expert_up[prefix] = weight
+            loaded.add(name)
+            loaded_params.add(resolved_name)
+
+        elif "down_proj_w" in resolved_name and "mlp" in resolved_name:
+            prefix = resolved_name.rsplit("down_proj_w", 1)[0]
+            expert_down_native[prefix] = weight
             loaded.add(name)
             loaded_params.add(resolved_name)
 
@@ -387,34 +443,26 @@ def load_checkpoint(
             loaded.add(name)
             loaded_params.add(resolved_name)
 
-    # Load expert MLP weight pairs with TP sharding
-    unpaired_gu = set(expert_gate_up.keys()) - set(expert_down.keys())
-    unpaired_dn = set(expert_down.keys()) - set(expert_gate_up.keys())
-    if unpaired_gu or unpaired_dn:
-        _logger = logging.getLogger("vllm_i64.loader")
-        for p in unpaired_gu:
-            _logger.warning("Expert gate_up_proj without matching down_proj: %s", p)
-        for p in unpaired_dn:
-            _logger.warning("Expert down_proj without matching gate_up_proj: %s", p)
-
-    for prefix in expert_gate_up:
-        if prefix in expert_down:
-            module_path = prefix.rstrip(".")
-            mlp_module = _get_module_for_param(model, module_path + ".gate_up_proj")
-            if mlp_module is None:
-                # Try navigating to the MLP module directly
-                parts = module_path.split(".")
-                mlp = model
-                for p in parts:
-                    if hasattr(mlp, p):
-                        mlp = getattr(mlp, p)
-                mlp_module = mlp
-
-            if hasattr(mlp_module, "load_full_weights"):
-                mlp_module.load_full_weights(
-                    expert_gate_up[prefix].to(dtype),
-                    expert_down[prefix].to(dtype),
-                )
+    native_prefixes = set(expert_gate) | set(expert_up) | set(expert_down_native)
+    for prefix in native_prefixes:
+        if not (
+            prefix in expert_gate
+            and prefix in expert_up
+            and prefix in expert_down_native
+        ):
+            raise RuntimeError(
+                f"Incomplete native expert weights for {prefix}: "
+                f"gate={prefix in expert_gate}, up={prefix in expert_up}, "
+                f"down={prefix in expert_down_native}"
+            )
+        module = model
+        for part in prefix.rstrip(".").split("."):
+            module = getattr(module, part)
+        module.load_full_weights(
+            expert_gate[prefix].to(dtype),
+            expert_up[prefix].to(dtype),
+            expert_down_native[prefix].to(dtype),
+        )
 
     # Check for unloaded model params
     model_params = set(params.keys())
@@ -501,21 +549,19 @@ def load_model_by_name(
     config_module = importlib.import_module(config_module_path)
     config_cls = getattr(config_module, config_class_name)
 
-    # Load config — use checkpoint dir's config.json if override provided
-    config_path = entry.config_path
-    if checkpoint_override:
-        import os
-        override_config = os.path.join(checkpoint_override, "config.json")
-        if os.path.exists(override_config):
-            config_path = override_config
+    ckpt_path = resolve_checkpoint_source(
+        checkpoint_override or entry.checkpoint or ""
+    )
+
+    # The model repository is the source of truth for both config and weights.
+    config_path = str(Path(ckpt_path) / "config.json")
+    if not Path(config_path).exists():
+        raise FileNotFoundError(f"Model config not found: {config_path}")
     config = config_cls.from_json(config_path)
 
     # Create model — TP layers auto-detect tp_size from global state
     model = model_cls(config)
     model = model.to(dtype)
-
-    # Resolve checkpoint path
-    ckpt_path = checkpoint_override or entry.checkpoint
 
     # Auto-detect AWQ/GPTQ from checkpoint if quantization not explicitly set
     effective_quant = quantization
@@ -543,9 +589,14 @@ def load_model_by_name(
         # Standard float checkpoint
         load_checkpoint(model, ckpt_path, dtype=dtype, device=device)
 
+    if device == "cpu":
+        _fuse_cpu_projection_layers(model)
+
     # Post-load quantization (only for float checkpoints, not pre-quantized)
     if effective_quant and effective_quant not in ("none", "awq", "gptq"):
-        if effective_quant == "fp8":
+        if effective_quant == "int8" and device == "cpu":
+            model = _quantize_cpu_dynamic(model)
+        elif effective_quant == "fp8":
             _quantize_dense_mlp_fp8(model)
         else:
             _quantize_experts(model, effective_quant)

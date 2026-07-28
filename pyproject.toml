@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vllm-i64"
-version = "0.2.0"
+version = "0.3.0"
 description = "Integer-first inference engine for token-routed language models"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -30,6 +30,7 @@ dependencies = [
     "prometheus-client>=0.17",
     "safetensors>=0.4",
     "transformers>=4.38",
+    "huggingface-hub>=0.20",
 ]
 
 [project.optional-dependencies]

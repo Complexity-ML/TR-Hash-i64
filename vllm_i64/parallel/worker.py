@@ -54,7 +54,8 @@ def main():
 def _run_serve(args: list, tp, pp):
     """Run the serve command in distributed mode."""
     import argparse
-    from vllm_i64.core.loader import load_model_by_name
+    from vllm_i64.core.loader import load_model_by_name, resolve_checkpoint_source
+    from vllm_i64.core.registry import get_model_entry
     from vllm_i64.engine.i64_engine import I64Engine
     from vllm_i64.core.tokenizer import load_tokenizer
 
@@ -75,9 +76,13 @@ def _run_serve(args: list, tp, pp):
         logger.info("vllm-i64 :: serving %s (TP=%d, PP=%d)", parsed.model, tp.tp_size, pp.pp_size)
 
     # Each rank loads its shard (TP shards weights, PP shards layers)
+    entry = get_model_entry(parsed.model)
+    resolved_checkpoint = resolve_checkpoint_source(
+        parsed.checkpoint or entry.checkpoint
+    )
     model = load_model_by_name(
         parsed.model, dtype=dtype, device=tp.device,
-        checkpoint_override=parsed.checkpoint,
+        checkpoint_override=resolved_checkpoint,
         quantization=parsed.quantization,
     )
     model.eval()
@@ -93,7 +98,9 @@ def _run_serve(args: list, tp, pp):
         # Only global rank 0 runs the API server
         from vllm_i64.api.server import I64Server
 
-        tokenizer = load_tokenizer(parsed.model)
+        tokenizer = load_tokenizer(
+            parsed.model, checkpoint_path=resolved_checkpoint
+        )
         chat_template = None
         if parsed.chat_template:
             with open(parsed.chat_template, encoding="utf-8") as f:

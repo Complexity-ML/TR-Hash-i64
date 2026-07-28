@@ -23,7 +23,7 @@ class ComplexityDeepConfig:
     architecture: str = "DeepForCausalLM"
     version: str = "0.13.0"
 
-    # Dimensions (defaults match 384M Token-Routed model)
+    # Dimensions
     vocab_size: int = 32000
     hidden_size: int = 1024
     intermediate_size: int = 3200
@@ -54,6 +54,11 @@ class ComplexityDeepConfig:
     num_experts: int = 4
     shared_expert: bool = True
     shared_intermediate_size: Optional[int] = None  # None = expert_intermediate_size
+    top_k: int = 1
+    top_k_primary_weight: Optional[float] = None
+    use_shared_routed_gates: bool = False
+    shared_gate_init: float = 1.0
+    routed_gate_init: float = 1.0
 
     # Attention features
     use_qk_norm: bool = True
