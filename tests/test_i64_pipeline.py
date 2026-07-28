@@ -21,7 +21,8 @@ from vllm_i64.kernels.i64_ops import (
     i64_full_pipeline,
 )
 from vllm_i64.engine.i64_scheduler import I64Scheduler, I64Request
-from vllm_i64.engine.i64_engine import I64Engine
+from vllm_i64.engine.i64_engine import I64Engine, sampling_requires_token_history
+from vllm_i64.core.sampling import SamplingParams
 
 
 # =============================================================================
@@ -175,6 +176,20 @@ class TestI64Scheduler:
 
 class TestI64Engine:
     """Test engine with dummy model (no GPU required)."""
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            SamplingParams(repetition_penalty=1.1),
+            SamplingParams(frequency_penalty=0.5),
+            SamplingParams(presence_penalty=0.5),
+        ],
+    )
+    def test_sampling_penalties_request_token_history(self, params):
+        assert sampling_requires_token_history(params)
+
+    def test_default_sampling_does_not_request_token_history(self):
+        assert not sampling_requires_token_history(SamplingParams())
 
     def test_generate_no_model(self):
         """Engine works without model (dummy logits)."""

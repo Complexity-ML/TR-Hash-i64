@@ -127,8 +127,13 @@ class HelpersMixin:
             except Exception as e:
                 logger.debug("[CHAT] HF apply_chat_template failed: %s", e)
 
-        # Pre-train model — raw concat
-        return "".join(m.get("content", "") for m in normalized)
+        # Pre-train model — preserve message boundaries without introducing an
+        # instruction/chat template the checkpoint was not trained to follow.
+        return "\n\n".join(
+            content
+            for message in normalized
+            if (content := message.get("content", "").strip())
+        )
 
     def _apply_chat_template(self, messages: List[Dict]) -> str:
         return self._render_chat_template(self._normalize_chat_messages(messages))

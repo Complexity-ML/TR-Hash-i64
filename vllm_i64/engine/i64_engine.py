@@ -35,7 +35,7 @@ from collections import deque
 from vllm_i64.engine.i64_scheduler import I64Scheduler, I64Batch, I64Request, RequestStatus
 from vllm_i64.core.sampling import (
     SamplingParams, sample_batch, sample_batch_with_logprobs,
-    apply_repetition_penalty_batch, TokenLogprob,
+    TokenLogprob,
 )
 from vllm_i64.engine.sampler import I64Sampler
 from vllm_i64.core.logging import get_logger
@@ -82,6 +82,15 @@ class GenerationResult:
     elapsed_ms: float   # Only float for human-readable timing
     finish_reason: str = "length"  # "length", "stop", "timeout", "cancelled"
     token_logprobs: Optional[List[TokenLogprob]] = None
+
+
+def sampling_requires_token_history(params: SamplingParams) -> bool:
+    """Return whether any configured sampling penalty needs prior tokens."""
+    return (
+        params.repetition_penalty != 1.0
+        or params.frequency_penalty != 0.0
+        or params.presence_penalty != 0.0
+    )
 
 
 class I64Engine:
@@ -886,7 +895,7 @@ class I64Engine:
                 group_logits = logits[indices]
 
                 past_tokens_list = None
-                if params.repetition_penalty != 1.0:
+                if sampling_requires_token_history(params):
                     past_tokens_list = []
                     for _, rid, _ in group:
                         req = _running_index.get(rid)
@@ -907,7 +916,7 @@ class I64Engine:
                 req = _running_index.get(rid)
 
                 past_tokens = None
-                if params.repetition_penalty != 1.0:
+                if sampling_requires_token_history(params):
                     if req is not None:
                         past_tokens = [req.prompt_list + req.output_token_ids]
                     else:
@@ -941,7 +950,7 @@ class I64Engine:
         else:
             # Fast path: all requests share the same params
             past_tokens_list = None
-            if self.sampling_params.repetition_penalty != 1.0:
+            if sampling_requires_token_history(self.sampling_params):
                 past_tokens_list = []
                 for rid in request_id_list:
                     req = _running_index.get(rid)

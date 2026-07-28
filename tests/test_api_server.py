@@ -337,6 +337,23 @@ async def test_chat_completions(client):
 
 
 @pytest.mark.asyncio
+async def test_chat_completions_preserve_raw_message_boundaries(client):
+    resp = await client.post("/v1/chat/completions", json={
+        "messages": [
+            {"role": "user", "content": "First turn"},
+            {"role": "assistant", "content": "First answer"},
+            {"role": "user", "content": "Second turn"},
+        ],
+        "max_tokens": 3,
+    })
+
+    assert resp.status == 200
+    data = await resp.json()
+    expected_prompt = "First turn\n\nFirst answer\n\nSecond turn"
+    assert data["context_metrics"]["prompt_tokens"] == len(expected_prompt)
+
+
+@pytest.mark.asyncio
 async def test_chat_completions_missing_messages(client):
     """Should return 400 for missing messages."""
     resp = await client.post("/v1/chat/completions", json={
