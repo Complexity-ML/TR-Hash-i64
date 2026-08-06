@@ -31,6 +31,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from vllm_i64.engine.i64_engine import I64Engine
 from vllm_i64.api.server import I64Server, CompletionRequest, CompletionResponse
+from vllm_i64.api._completions import CompletionsMixin
 from vllm_i64.api.middleware import TokenBucketRateLimiter
 from vllm_i64.api.tracking import UsageTracker, RequestCache, LatencyTracker, PriorityManager
 
@@ -639,6 +640,21 @@ class TestCompletionRequest:
         params = req.to_sampling_params()
         assert params.temperature == 0.5
         assert params.top_k == 10
+
+
+class TestConversationCacheNamespace:
+    def test_same_conversation_reuses_namespace(self):
+        first = CompletionsMixin._cache_namespace(None, "conversation-a")
+        second = CompletionsMixin._cache_namespace(None, "conversation-a")
+        assert first == second
+
+    def test_new_conversation_is_cache_isolated(self):
+        first = CompletionsMixin._cache_namespace(None, "conversation-a")
+        second = CompletionsMixin._cache_namespace(None, "conversation-b")
+        assert first != second
+
+    def test_legacy_anonymous_request_keeps_open_namespace(self):
+        assert CompletionsMixin._cache_namespace(None, None) is None
 
 
 class TestCompletionResponse:

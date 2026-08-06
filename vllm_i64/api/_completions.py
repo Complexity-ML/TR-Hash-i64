@@ -27,17 +27,21 @@ class CompletionsMixin:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _cache_namespace(api_key: Optional[str]) -> Optional[bytes]:
-        """Derive a 16-byte KV cache namespace from the API key.
+    def _cache_namespace(
+        api_key: Optional[str],
+        user_id: Optional[str] = None,
+    ) -> Optional[bytes]:
+        """Derive a 16-byte KV cache namespace from tenant and conversation.
 
-        Blocks are hashed per-namespace so different API keys never share
-        cached KV blocks — eliminates cross-user timing oracle attacks.
-        Returns None when no API key is present (anonymous requests share
-        an open namespace among themselves, which is acceptable).
+        ``user_id`` is the OpenAI-compatible ``user`` request field. Clients
+        can keep it stable inside one conversation and rotate it for a new
+        conversation. This preserves useful prefix reuse within a chat while
+        preventing any block reuse across unrelated anonymous chats.
         """
-        if not api_key:
+        if not api_key and not user_id:
             return None
-        return hashlib.sha256(api_key.encode()).digest()[:16]
+        material = f"{api_key or ''}\0{user_id or ''}".encode()
+        return hashlib.sha256(material).digest()[:16]
 
     async def _async_complete(
         self,
@@ -50,7 +54,7 @@ class CompletionsMixin:
         if prompt_ids is None:
             prompt_ids = await self._tokenize_async(request.prompt)
         pixel_values = getattr(request, '_pixel_values', None)
-        ns = self._cache_namespace(api_key)
+        ns = self._cache_namespace(api_key, request.user)
 
         result = await self.async_engine.generate(
             prompt_token_ids=prompt_ids,
@@ -94,7 +98,7 @@ class CompletionsMixin:
         output_ids: List[int] = []
         prev_text = ""
         finish_reason = "length"
-        ns = self._cache_namespace(api_key)
+        ns = self._cache_namespace(api_key, request.user)
         async for item in self.async_engine.generate_stream(
             prompt_token_ids=prompt_ids,
             max_new_tokens=request.max_tokens,
@@ -124,7 +128,7 @@ class CompletionsMixin:
             prompt_ids = await self._tokenize_async(request.prompt)
         stream_id = self._next_request_id()
         created = int(time.time())
-        ns = self._cache_namespace(api_key)
+        ns = self._cache_namespace(api_key, request.user)
 
         initial_chunk = {
             "id": stream_id,
@@ -209,6 +213,7 @@ class CompletionsMixin:
             presence_penalty=body.get("presence_penalty", 0.0),
             priority=body.get("priority", 0),
             suppress_first_tokens=self._space_suppress_ids,
+            user=body.get("user"),
         )
         max_seq_len = self.sync_engine.scheduler.max_seq_len
         error = req.validate(max_seq_len=max_seq_len)
