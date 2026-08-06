@@ -34,6 +34,8 @@ class TokenRoutedMLP(nn.Module):
         use_shared_routed_gates: bool = False,
         shared_gate_init: float = 1.0,
         routed_gate_init: float = 1.0,
+        shared_output_scale: float = 1.0,
+        routed_output_scale: float = 1.0,
     ):
         super().__init__()
         tp = get_tp()
@@ -54,6 +56,8 @@ class TokenRoutedMLP(nn.Module):
             min(1.0, max(0.0, float(top_k_primary_weight)))
             if self.top_k > 1 else 1.0
         )
+        self.shared_output_scale = float(shared_output_scale)
+        self.routed_output_scale = float(routed_output_scale)
 
         self.full_expert_inter = intermediate_size // num_experts
         self.expert_inter = self.full_expert_inter // tp.tp_size
@@ -91,6 +95,16 @@ class TokenRoutedMLP(nn.Module):
             "token_to_expert",
             torch.arange(vocab_size, dtype=torch.long) % num_experts,
         )
+        self.register_buffer(
+            "topk_token_to_expert",
+            torch.stack(
+                [
+                    (torch.arange(vocab_size, dtype=torch.long) + route_idx)
+                    % num_experts
+                    for route_idx in range(self.top_k)
+                ]
+            ),
+        )
 
         nn.init.kaiming_uniform_(self.gate_proj_w, a=5**0.5)
         nn.init.kaiming_uniform_(self.up_proj_w, a=5**0.5)
@@ -107,13 +121,13 @@ class TokenRoutedMLP(nn.Module):
             primary = torch.zeros(num_tokens, dtype=torch.long, device=device)
         else:
             token_ids_clamped = token_ids.clamp(0, self.vocab_size - 1)
-            primary = self.token_to_expert[token_ids_clamped]
-        routes = [primary]
-        routes.extend(
-            (primary + route_idx) % self.num_experts
-            for route_idx in range(1, self.top_k)
+            return self.topk_token_to_expert[:, token_ids_clamped]
+        return torch.stack(
+            [
+                (primary + route_idx) % self.num_experts
+                for route_idx in range(self.top_k)
+            ]
         )
-        return torch.stack(routes)
 
     def expert_forward(self, x: torch.Tensor, expert_ids: torch.Tensor) -> torch.Tensor:
         """Sparse dispatch with loop — matches framework supplementary code."""
@@ -163,7 +177,12 @@ class TokenRoutedMLP(nn.Module):
                     + self.routed_output_gate * output
                 )
             else:
-                output = output + shared_out
+                output = (
+                    self.routed_output_scale * output
+                    + self.shared_output_scale * shared_out
+                )
+        else:
+            output = self.routed_output_scale * output
 
         return output
 

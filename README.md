@@ -1,15 +1,14 @@
 # vllm-i64
 
-Inference server for the matched 306.5M-parameter model pair from
-Complexity-ML:
+Inference server for deterministic token-routed models from Complexity-ML:
 
+- `tr-hash-moe-500m` → [`Pacific-i64/TR-HASH-MOE-500M-HF`](https://huggingface.co/Pacific-i64/TR-HASH-MOE-500M-HF)
 - `tr-moe-306` → [`Pacific-i64/TR-MOE-306`](https://huggingface.co/Pacific-i64/TR-MOE-306)
 - `dense-306` → [`Pacific-i64/Dense-306`](https://huggingface.co/Pacific-i64/Dense-306)
 
-The public catalogue intentionally contains only these two models. Both use
-the same tokenizer, dimensions and API. The routed model implements the
-checkpoint exactly: layer-specific deterministic top-2 routing, 0.5/0.5 route
-weights, a shared SwiGLU path and the learned shared/routed output gates.
+The 500M runtime loads its layer-specific balanced hash tables exactly, uses
+top-2 0.5/0.5 routing and applies the trained shared/routed output scales. The
+306M pair remains available for matched routed-versus-dense comparisons.
 
 ## Install
 
@@ -22,7 +21,7 @@ pip install git+https://github.com/Complexity-ML/vllm-i64.git@main
 The model snapshot is downloaded automatically from Hugging Face:
 
 ```bash
-vllm-i64 serve tr-moe-306 \
+vllm-i64 serve tr-hash-moe-500m \
   --host 0.0.0.0 \
   --port 7860 \
   --quantization none
@@ -60,13 +59,19 @@ CUDA when a GPU is available.
 curl http://127.0.0.1:7860/v1/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "tr-moe-306",
+    "model": "tr-hash-moe-500m",
     "prompt": "The meaning of life is",
     "max_tokens": 64,
     "temperature": 0.7,
+    "top_k": 40,
+    "top_p": 0.9,
+    "repetition_penalty": 1.1,
     "stream": false
   }'
 ```
+
+`top_k`, `top_p` and `repetition_penalty` are supported by both completion
+endpoints and are applied per request after temperature scaling.
 
 Useful endpoints:
 

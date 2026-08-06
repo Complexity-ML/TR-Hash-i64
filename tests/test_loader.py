@@ -92,6 +92,9 @@ class TestComplexityDeepConfig:
             "use_shared_routed_gates": True,
             "shared_gate_init": 0.5,
             "routed_gate_init": 0.5,
+            "shared_output_scale": 1.0,
+            "routed_output_scale": 2.0,
+            "routing_strategy": "token_id_balanced_hash",
         }
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump(data, f)
@@ -102,18 +105,29 @@ class TestComplexityDeepConfig:
             assert config.top_k == 2
             assert config.top_k_primary_weight == 0.5
             assert config.use_shared_routed_gates is True
+            assert config.shared_output_scale == 1.0
+            assert config.routed_output_scale == 2.0
+            assert config.routing_strategy == "token_id_balanced_hash"
         finally:
             os.unlink(path)
 
 
 class TestPublicRegistry:
-    def test_only_matched_306m_pair_is_public(self):
+    def test_public_models_include_tr_hash_500m(self):
         from vllm_i64.core.registry import list_models
 
         assert [item["name"] for item in list_models()] == [
+            "tr-hash-moe-500m",
             "tr-moe-306",
             "dense-306",
         ]
+
+    def test_tr_hash_500m_registry_entry(self):
+        from vllm_i64.core.registry import get_model_entry
+
+        entry = get_model_entry("tr-hash-moe-500m")
+        assert entry.checkpoint == "Pacific-i64/TR-HASH-MOE-500M-HF"
+        assert entry.parameters == "492.1M"
 
 
 class TestGetModuleForParam:
@@ -142,7 +156,7 @@ class TestLoadCheckpoint:
         config = ComplexityDeepConfig(
             hidden_size=64, num_hidden_layers=1, num_attention_heads=2,
             num_key_value_heads=2, intermediate_size=128, num_experts=2,
-            vocab_size=32, max_position_embeddings=32,
+            vocab_size=32, max_position_embeddings=32, top_k=2,
         )
         return ComplexityDeepModel(config), config
 
@@ -199,6 +213,35 @@ class TestLoadCheckpoint:
         try:
             stats = load_checkpoint(model, path, dtype=torch.float32)
             assert stats["skipped"] >= 1
+        finally:
+            os.unlink(path)
+
+    def test_loads_native_tr_hash_top2_table_exactly(self):
+        model, config = self._make_small_model()
+        route_table = torch.stack(
+            [
+                torch.arange(config.vocab_size) % config.num_experts,
+                (torch.arange(config.vocab_size) * 7 + 1) % config.num_experts,
+            ]
+        )
+
+        with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
+            torch.save(
+                {"layers.0.mlp.topk_token_to_expert": route_table},
+                f.name,
+            )
+            path = f.name
+
+        try:
+            load_checkpoint(model, path, dtype=torch.float32)
+            mlp = model.layers[0].mlp
+            assert torch.equal(mlp.topk_token_to_expert, route_table)
+            assert torch.equal(mlp.token_to_expert, route_table[0])
+            token_ids = torch.tensor([1, 7, 11])
+            assert torch.equal(
+                mlp.route(token_ids, len(token_ids), token_ids.device),
+                route_table[:, token_ids],
+            )
         finally:
             os.unlink(path)
 

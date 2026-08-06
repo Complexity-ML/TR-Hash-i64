@@ -59,6 +59,10 @@ class ComplexityDeepConfig:
     use_shared_routed_gates: bool = False
     shared_gate_init: float = 1.0
     routed_gate_init: float = 1.0
+    shared_output_scale: float = 1.0
+    routed_output_scale: float = 1.0
+    routing_strategy: str = "modulo_cyclic"
+    source_mlp_type: Optional[str] = None
 
     # Attention features
     use_qk_norm: bool = True

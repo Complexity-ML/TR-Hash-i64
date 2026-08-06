@@ -295,6 +295,8 @@ class MoEMLP(nn.Module):
             use_shared_routed_gates=getattr(config, 'use_shared_routed_gates', False),
             shared_gate_init=getattr(config, 'shared_gate_init', 1.0),
             routed_gate_init=getattr(config, 'routed_gate_init', 1.0),
+            shared_output_scale=getattr(config, 'shared_output_scale', 1.0),
+            routed_output_scale=getattr(config, 'routed_output_scale', 1.0),
         )
 
     def forward(self, x, token_ids=None, **kwargs):
@@ -334,6 +336,8 @@ class ComplexityDecoderLayer(nn.Module):
                 ),
                 shared_gate_init=getattr(config, 'shared_gate_init', 1.0),
                 routed_gate_init=getattr(config, 'routed_gate_init', 1.0),
+                shared_output_scale=getattr(config, 'shared_output_scale', 1.0),
+                routed_output_scale=getattr(config, 'routed_output_scale', 1.0),
             )
         else:
             self.mlp = DenseSwiGLUMLP(config)

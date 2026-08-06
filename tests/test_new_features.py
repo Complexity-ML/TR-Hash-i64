@@ -191,9 +191,20 @@ class TestInputValidation:
         assert req.validate() is None
 
     def test_to_sampling_params(self):
-        req = CompletionRequest(prompt="hello", max_tokens=10, temperature=0.5, logprobs=3)
+        req = CompletionRequest(
+            prompt="hello",
+            max_tokens=10,
+            temperature=0.5,
+            top_k=23,
+            top_p=0.82,
+            repetition_penalty=1.17,
+            logprobs=3,
+        )
         params = req.to_sampling_params()
         assert params.temperature == 0.5
+        assert params.top_k == 23
+        assert params.top_p == 0.82
+        assert params.repetition_penalty == 1.17
         assert params.logprobs == 3
 
     def test_to_sampling_params_with_json_mode(self):

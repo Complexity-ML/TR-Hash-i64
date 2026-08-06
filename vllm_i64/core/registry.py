@@ -111,6 +111,15 @@ def resolve_architecture(
 
 
 register_model(
+    name="tr-hash-moe-500m",
+    model_class=_COMPLEXITY_DEEP[0],
+    config_loader=_COMPLEXITY_DEEP[1],
+    checkpoint="Pacific-i64/TR-HASH-MOE-500M-HF",
+    parameters="492.1M",
+    description="Balanced token-ID hash top-2 residual experts with shared SwiGLU",
+)
+
+register_model(
     name="tr-moe-306",
     model_class=_COMPLEXITY_DEEP[0],
     config_loader=_COMPLEXITY_DEEP[1],

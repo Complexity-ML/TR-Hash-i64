@@ -371,11 +371,38 @@ def load_checkpoint(
             if name in loaded:
                 continue
 
-        # Buffer (token_to_expert — replicated)
+        # Native TR-Hash exports store all deterministic routes explicitly as
+        # [top_k, vocab]. Loading the table is required for exact inference;
+        # silently deriving cyclic routes would change the trained model.
+        if "topk_token_to_expert" in name:
+            buf_name = name.replace("model.", "", 1) if name not in buffers else name
+            if buf_name in buffers:
+                buffers[buf_name].copy_(weight.long())
+                loaded.add(name)
+                legacy_name = buf_name.replace(
+                    "topk_token_to_expert", "token_to_expert"
+                )
+                if legacy_name in buffers:
+                    buffers[legacy_name].copy_(weight[0].long())
+            continue
+
+        # Legacy primary routing table (replicated).
         if "token_to_expert" in name:
             buf_name = name.replace("model.", "", 1) if name not in buffers else name
             if buf_name in buffers:
-                buffers[buf_name].copy_(weight)
+                primary = weight.long()
+                buffers[buf_name].copy_(primary)
+                topk_name = buf_name.replace(
+                    "token_to_expert", "topk_token_to_expert"
+                )
+                if topk_name in buffers:
+                    owner_path = topk_name.rsplit(".", 1)[0]
+                    owner = _get_module_for_param(model, owner_path + ".dummy")
+                    num_experts = getattr(owner, "num_experts", 1)
+                    for route_idx in range(buffers[topk_name].shape[0]):
+                        buffers[topk_name][route_idx].copy_(
+                            (primary + route_idx) % num_experts
+                        )
                 loaded.add(name)
             continue
 
