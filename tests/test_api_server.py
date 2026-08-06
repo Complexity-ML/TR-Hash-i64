@@ -543,6 +543,31 @@ async def test_rate_limiting(rate_client):
     assert data["error"]["type"] == "rate_limit_error"
 
 
+@pytest.mark.asyncio
+async def test_rate_limiting_does_not_charge_read_only_telemetry(rate_client):
+    """Polling model metadata must not consume the generation quota."""
+    for _ in range(5):
+        response = await rate_client.get("/v1/models")
+        assert response.status == 200
+
+    first = await rate_client.post("/v1/completions", json={
+        "prompt": "first generation",
+        "max_tokens": 2,
+    })
+    second = await rate_client.post("/v1/completions", json={
+        "prompt": "second generation",
+        "max_tokens": 2,
+    })
+    third = await rate_client.post("/v1/completions", json={
+        "prompt": "third generation",
+        "max_tokens": 2,
+    })
+
+    assert first.status == 200
+    assert second.status == 200
+    assert third.status == 429
+
+
 # =====================================================================
 # Batch Endpoint
 # =====================================================================

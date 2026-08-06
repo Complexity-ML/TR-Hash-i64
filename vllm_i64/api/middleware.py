@@ -115,10 +115,10 @@ def make_auth_middleware(api_key: str):
 
 
 def make_rate_limit_middleware(rate_limiter: TokenBucketRateLimiter):
-    """Create per-IP rate limiting middleware."""
+    """Rate-limit inference-style POST requests without charging telemetry GETs."""
     @web.middleware
     async def rate_limit_middleware(request, handler):
-        if request.path.startswith("/v1/"):
+        if request.method == "POST" and request.path.startswith("/v1/"):
             ip = request.remote or "unknown"
             if not await rate_limiter.allow(ip):
                 return web.json_response(
