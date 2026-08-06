@@ -11,6 +11,8 @@ Tests for:
 INL - 2025
 """
 
+import json
+
 import torch
 import pytest
 import sys
@@ -23,7 +25,7 @@ from vllm_i64.core.quantization import (
     QuantConfig, quantize_int8, dequantize_int8,
     quantize_int4, dequantize_int4, quantize_experts,
 )
-from vllm_i64.core.chat_template import ChatTemplate
+from vllm_i64.core.chat_template import ChatTemplate, find_chat_template
 from vllm_i64.layers.rmsnorm import RMSNorm
 from vllm_i64.layers.rotary import RotaryEmbedding, apply_rotary
 
@@ -180,6 +182,21 @@ class TestChatTemplate:
         tmpl = ChatTemplate("{{ messages | length }} messages")
         result = tmpl.apply([{"role": "user", "content": "x"}])
         assert "1" in result
+
+    def test_finds_template_in_tokenizer_config(self, tmp_path):
+        template = "User: {{ messages[0]['content'] }}\\nAssistant:"
+        (tmp_path / "tokenizer_config.json").write_text(
+            json.dumps({"chat_template": template}),
+            encoding="utf-8",
+        )
+        assert find_chat_template(str(tmp_path)) == template
+
+    def test_standalone_template_takes_precedence(self, tmp_path):
+        (tmp_path / "chat_template.jinja").write_text("standalone", encoding="utf-8")
+        (tmp_path / "tokenizer_config.json").write_text(
+            '{"chat_template": "embedded"}', encoding="utf-8"
+        )
+        assert find_chat_template(str(tmp_path)) == "standalone"
 
 
 # =========================================================================

@@ -183,25 +183,10 @@ def cmd_serve(args):
     if args.chat_template:
         with open(args.chat_template, encoding="utf-8") as f:
             chat_template = f.read()
-    else:
-        import os
-        ckpt_path = resolved_checkpoint
-        if ckpt_path:
-            search_dir = os.path.dirname(ckpt_path) if os.path.isfile(ckpt_path) else ckpt_path
-            for _ in range(4):  # checkpoint, parent, grandparent, great-grandparent
-                for name in ("chat_template.jinja", "chat_template.j2"):
-                    tmpl_path = os.path.join(search_dir, name)
-                    if os.path.exists(tmpl_path):
-                        with open(tmpl_path, encoding="utf-8") as f:
-                            chat_template = f.read()
-                        _logger.info("chat_template: %s", tmpl_path)
-                        break
-                if chat_template:
-                    break
-                parent = os.path.dirname(search_dir)
-                if parent == search_dir:
-                    break
-                search_dir = parent
+    elif resolved_checkpoint:
+        from vllm_i64.core.chat_template import find_chat_template
+
+        chat_template = find_chat_template(resolved_checkpoint)
 
     # Create engine + server (async continuous batching)
     # CPU uses the dedicated CPUEngine (no CUDA graphs, thread-executor step)

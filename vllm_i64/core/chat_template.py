@@ -7,8 +7,10 @@ Loads Jinja2 templates from checkpoint directories.
 INL - 2025
 """
 
+import json
 import logging
 import os
+from pathlib import Path
 from typing import List, Dict, Optional
 
 logger = logging.getLogger("vllm_i64.chat_template")
@@ -51,6 +53,43 @@ class ChatTemplate:
         """Load template from a .jinja file."""
         with open(path, "r", encoding="utf-8") as f:
             return ChatTemplate(f.read())
+
+
+def find_chat_template(checkpoint_path: str) -> Optional[str]:
+    """Find the chat template shipped with a model checkpoint.
+
+    Hugging Face commonly stores the template inside
+    ``tokenizer_config.json`` rather than as a standalone Jinja file.  Both
+    layouts are model artifacts and must be honored by the chat endpoint.
+    """
+
+    source = Path(checkpoint_path).expanduser()
+    search_dir = source.parent if source.is_file() else source
+    for _ in range(4):
+        for name in ("chat_template.jinja", "chat_template.j2", "template.jinja"):
+            path = search_dir / name
+            if path.is_file():
+                logger.info("chat_template: %s", path)
+                return path.read_text(encoding="utf-8")
+
+        tokenizer_config = search_dir / "tokenizer_config.json"
+        if tokenizer_config.is_file():
+            try:
+                template = json.loads(
+                    tokenizer_config.read_text(encoding="utf-8")
+                ).get("chat_template")
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning("Invalid tokenizer config %s: %s", tokenizer_config, exc)
+            else:
+                if isinstance(template, str) and template.strip():
+                    logger.info("chat_template: %s#chat_template", tokenizer_config)
+                    return template
+
+        parent = search_dir.parent
+        if parent == search_dir:
+            break
+        search_dir = parent
+    return None
 
 
 def load_chat_template(model_name: str) -> Optional[ChatTemplate]:

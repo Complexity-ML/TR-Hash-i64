@@ -105,6 +105,10 @@ def _run_serve(args: list, tp, pp):
         if parsed.chat_template:
             with open(parsed.chat_template, encoding="utf-8") as f:
                 chat_template = f.read()
+        elif resolved_checkpoint:
+            from vllm_i64.core.chat_template import find_chat_template
+
+            chat_template = find_chat_template(resolved_checkpoint)
 
         server = I64Server(
             engine=engine,

@@ -113,7 +113,22 @@ class HelpersMixin:
     def _render_chat_template(self, normalized: List[Dict[str, str]]) -> str:
         if self.chat_template:
             from jinja2 import Template
-            prompt = Template(self.chat_template).render(messages=normalized, add_generation_prompt=True)
+            eos_token = ""
+            bos_token = ""
+            pad_token = ""
+            if self.tokenizer is not None:
+                backend = getattr(self.tokenizer, "tokenizer", None)
+                if backend is not None:
+                    eos_token = backend.id_to_token(self.tokenizer.eos_token_id) or ""
+                    bos_token = backend.id_to_token(self.tokenizer.bos_token_id) or ""
+                    pad_token = backend.id_to_token(self.tokenizer.pad_token_id) or ""
+            prompt = Template(self.chat_template).render(
+                messages=normalized,
+                add_generation_prompt=True,
+                eos_token=eos_token,
+                bos_token=bos_token,
+                pad_token=pad_token,
+            )
             logger.info("[CHAT] Jinja template applied")
             return prompt
 
