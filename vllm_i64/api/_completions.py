@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import time
+import uuid
 from typing import AsyncGenerator, Dict, List, Optional
 
 from aiohttp import web
@@ -30,18 +31,38 @@ class CompletionsMixin:
     def _cache_namespace(
         api_key: Optional[str],
         user_id: Optional[str] = None,
+        conversation_id: Optional[str] = None,
     ) -> Optional[bytes]:
         """Derive a 16-byte KV cache namespace from tenant and conversation.
 
-        ``user_id`` is the OpenAI-compatible ``user`` request field. Clients
-        can keep it stable inside one conversation and rotate it for a new
-        conversation. This preserves useful prefix reuse within a chat while
-        preventing any block reuse across unrelated anonymous chats.
+        ``conversation_id`` is preferred when supplied. ``user_id`` remains
+        supported for OpenAI-compatible clients that use that field as their
+        conversation/session identifier. The namespace is deliberately kept
+        separate from the rendered prompt: two new chats can have the same
+        system/template prefix without sharing KV blocks.
         """
-        if not api_key and not user_id:
+        scope = conversation_id or user_id
+        if not api_key and not scope:
             return None
-        material = f"{api_key or ''}\0{user_id or ''}".encode()
+        material = f"{api_key or ''}\0{scope or ''}".encode()
         return hashlib.sha256(material).digest()[:16]
+
+    @staticmethod
+    def _chat_conversation_id(request: web.Request, body: dict) -> str:
+        """Return the cache scope for a chat request.
+
+        The UI may provide a stable ``user`` field or one of the explicit
+        conversation headers. If it provides neither, mint a request-local
+        scope. This makes a fresh anonymous chat strictly isolated instead of
+        reusing the common system/template prefix from another chat.
+        """
+        return (
+            body.get("conversation_id")
+            or body.get("user")
+            or request.headers.get("X-Conversation-Id")
+            or request.headers.get("X-Session-Id")
+            or f"anonymous-chat-{uuid.uuid4().hex}"
+        )
 
     async def _async_complete(
         self,
@@ -359,6 +380,7 @@ class CompletionsMixin:
             presence_penalty=body.get("presence_penalty", 0.0),
             priority=body.get("priority", 0),
             suppress_first_tokens=self._space_suppress_ids,
+            user=self._chat_conversation_id(request, body),
         )
         req._pixel_values = pixel_values
         req._prompt_token_ids = prompt_ids

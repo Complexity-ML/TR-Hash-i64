@@ -656,6 +656,15 @@ class TestConversationCacheNamespace:
     def test_legacy_anonymous_request_keeps_open_namespace(self):
         assert CompletionsMixin._cache_namespace(None, None) is None
 
+    def test_conversation_id_overrides_user_scope(self):
+        first = CompletionsMixin._cache_namespace(
+            None, "same-user", conversation_id="chat-a"
+        )
+        second = CompletionsMixin._cache_namespace(
+            None, "same-user", conversation_id="chat-b"
+        )
+        assert first != second
+
 
 class TestCompletionResponse:
     def test_default_choices(self):
