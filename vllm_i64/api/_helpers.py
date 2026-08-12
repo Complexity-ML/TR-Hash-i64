@@ -13,7 +13,11 @@ from typing import Dict, List, Optional
 from aiohttp import web
 
 from vllm_i64.core.logging import get_logger
-from vllm_i64.core.context_manager import ContextManager, ContextPlan
+from vllm_i64.core.context_manager import (
+    ContextManager,
+    ContextPlan,
+    sanitize_assistant_reasoning,
+)
 from vllm_i64.api.types import CompletionResponse
 from vllm_i64.engine.i64_engine import GenerationResult
 
@@ -105,10 +109,16 @@ class HelpersMixin:
     # ------------------------------------------------------------------
 
     def _normalize_chat_messages(self, messages: List[Dict]) -> List[Dict[str, str]]:
-        return [
-            {"role": m.get("role", "user"), "content": self._extract_content_text(m.get("content", ""))}
-            for m in messages
-        ]
+        normalized = []
+        for message in messages:
+            role = message.get("role", "user")
+            content = self._extract_content_text(message.get("content", ""))
+            if role == "assistant":
+                content = sanitize_assistant_reasoning(content)
+                if not content:
+                    continue
+            normalized.append({"role": role, "content": content})
+        return normalized
 
     def _render_chat_template(self, normalized: List[Dict[str, str]]) -> str:
         if self.chat_template:

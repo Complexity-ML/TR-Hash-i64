@@ -16,6 +16,38 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Sequence, Tuple
 
 
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
+_THINK_OPEN_RE = re.compile(r"<think>", re.IGNORECASE)
+_FINAL_BLOCK_RE = re.compile(r"<final>(.*?)</final>", re.IGNORECASE | re.DOTALL)
+_FINAL_OPEN_RE = re.compile(r"<final>", re.IGNORECASE)
+
+
+def sanitize_assistant_reasoning(content: str) -> str:
+    """Keep only model-facing final content from an assistant history turn.
+
+    Hidden reasoning is useful while producing one answer but must not become
+    evidence for the next turn.  A truncated ``<think>`` is especially unsafe:
+    replaying it makes the next generation continue the old chain instead of
+    answering the newest user message.
+    """
+
+    final_blocks = _FINAL_BLOCK_RE.findall(content)
+    if final_blocks:
+        return "\n".join(block.strip() for block in final_blocks if block.strip())
+
+    final_open = _FINAL_OPEN_RE.search(content)
+    if final_open:
+        return content[final_open.end():].replace("</final>", "").strip()
+
+    # Remove complete thought blocks.  If a thought was truncated, discard the
+    # unfinished suffix rather than feeding it back as conversational context.
+    visible = _THINK_BLOCK_RE.sub("", content)
+    think_open = _THINK_OPEN_RE.search(visible)
+    if think_open:
+        visible = visible[:think_open.start()]
+    return visible.replace("</think>", "").strip()
+
+
 class ContextWindowError(ValueError):
     """Raised when even the essential chat context cannot fit."""
 
@@ -233,6 +265,10 @@ class ContextManager:
             content = message.get("content", "")
             if not isinstance(content, str):
                 content = str(content) if content is not None else ""
+            if role == "assistant":
+                content = sanitize_assistant_reasoning(content)
+                if not content:
+                    continue
             normalized.append({"role": role, "content": content})
         return normalized
 

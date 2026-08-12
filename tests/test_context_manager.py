@@ -4,7 +4,12 @@ import pytest
 
 from vllm_i64.api.tracking import ContextMetricsTracker
 from vllm_i64.api.types import CompletionRequest
-from vllm_i64.core.context_manager import ContextManager, ContextWindowError
+from vllm_i64.api._helpers import HelpersMixin
+from vllm_i64.core.context_manager import (
+    ContextManager,
+    ContextWindowError,
+    sanitize_assistant_reasoning,
+)
 
 
 def _encode(text):
@@ -47,6 +52,46 @@ def test_context_under_budget_is_unchanged():
     assert plan.summarized_messages == 0
     assert plan.dropped_messages == 0
     assert plan.prompt_tokens + plan.reserved_output_tokens <= plan.max_seq_len
+
+
+def test_complete_reasoning_history_keeps_only_final_answer():
+    content = "<think>old private chain</think>\n<final>Four.</final>"
+
+    assert sanitize_assistant_reasoning(content) == "Four."
+
+
+def test_truncated_reasoning_history_is_not_replayed():
+    messages = [
+        {"role": "user", "content": "What is 2 + 2?"},
+        {"role": "assistant", "content": "<think>unfinished old chain"},
+        {"role": "user", "content": "What is 3 + 3?"},
+    ]
+
+    plan = _manager().fit(messages, max_output_tokens=64)
+
+    assert "unfinished old chain" not in plan.prompt
+    assert "What is 3 + 3?" in plan.prompt
+    assert all(message["role"] != "assistant" for message in plan.messages)
+
+
+def test_api_normalization_sanitizes_reasoning_before_template_rendering():
+    helper = HelpersMixin()
+    helper._extract_content_text = lambda content: content
+
+    normalized = helper._normalize_chat_messages([
+        {"role": "user", "content": "First question"},
+        {
+            "role": "assistant",
+            "content": "<think>private stale chain</think><final>First answer</final>",
+        },
+        {"role": "user", "content": "Second question"},
+    ])
+
+    assert normalized == [
+        {"role": "user", "content": "First question"},
+        {"role": "assistant", "content": "First answer"},
+        {"role": "user", "content": "Second question"},
+    ]
 
 
 def test_old_turns_are_summarized_and_recent_turns_are_kept():
@@ -145,4 +190,3 @@ def test_completion_request_validates_total_context_budget():
     assert request.validate(max_seq_len=256, prompt_tokens=128) is None
     error = request.validate(max_seq_len=256, prompt_tokens=129)
     assert "prompt_tokens (129) + max_tokens (128)" in error
-

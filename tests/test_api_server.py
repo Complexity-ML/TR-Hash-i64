@@ -355,6 +355,43 @@ async def test_chat_completions_preserve_raw_message_boundaries(client):
 
 
 @pytest.mark.asyncio
+async def test_chat_completions_do_not_replay_assistant_thoughts(client):
+    resp = await client.post("/v1/chat/completions", json={
+        "messages": [
+            {"role": "user", "content": "First question"},
+            {
+                "role": "assistant",
+                "content": "<think>private stale chain</think><final>First answer</final>",
+            },
+            {"role": "user", "content": "Second question"},
+        ],
+        "max_tokens": 3,
+    })
+
+    assert resp.status == 200
+    data = await resp.json()
+    expected_prompt = "First question\n\nFirst answer\n\nSecond question"
+    assert data["context_metrics"]["prompt_tokens"] == len(expected_prompt)
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_drop_truncated_assistant_thought(client):
+    resp = await client.post("/v1/chat/completions", json={
+        "messages": [
+            {"role": "user", "content": "First question"},
+            {"role": "assistant", "content": "<think>unfinished stale chain"},
+            {"role": "user", "content": "Second question"},
+        ],
+        "max_tokens": 3,
+    })
+
+    assert resp.status == 200
+    data = await resp.json()
+    expected_prompt = "First question\n\nSecond question"
+    assert data["context_metrics"]["prompt_tokens"] == len(expected_prompt)
+
+
+@pytest.mark.asyncio
 async def test_chat_completions_missing_messages(client):
     """Should return 400 for missing messages."""
     resp = await client.post("/v1/chat/completions", json={
