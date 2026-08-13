@@ -460,6 +460,53 @@ async def test_chat_stream_exposes_context_metrics(client):
 
 
 @pytest.mark.asyncio
+async def test_chat_response_restores_think_generation_prefill(client, server):
+    server.chat_template = (
+        "{% for message in messages %}"
+        "{{ message['role'] }}: {{ message['content'] }}\\n"
+        "{% endfor %}"
+        "{% if add_generation_prompt %}"
+        "{{ 'Assistant:\\n<think>\\n' }}"
+        "{% endif %}"
+    )
+
+    resp = await client.post("/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "Hello"}],
+        "max_tokens": 2,
+    })
+
+    assert resp.status == 200
+    content = (await resp.json())["choices"][0]["message"]["content"]
+    assert content.startswith("<think>\n")
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_starts_with_think_generation_prefill(client, server):
+    server.chat_template = (
+        "{% for message in messages %}"
+        "{{ message['role'] }}: {{ message['content'] }}\\n"
+        "{% endfor %}"
+        "{% if add_generation_prompt %}"
+        "{{ 'Assistant:\\n<think>\\n' }}"
+        "{% endif %}"
+    )
+
+    resp = await client.post("/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "Hello"}],
+        "max_tokens": 2,
+        "stream": True,
+    })
+
+    assert resp.status == 200
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in (await resp.read()).decode("utf-8").splitlines()
+        if line.startswith("data: {")
+    ]
+    assert events[0]["choices"][0]["delta"]["content"] == "<think>\n"
+
+
+@pytest.mark.asyncio
 async def test_metrics_expose_context_aggregation(client):
     await client.post("/v1/chat/completions", json={
         "messages": [{"role": "user", "content": "Hello"}],

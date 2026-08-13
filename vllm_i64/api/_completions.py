@@ -23,6 +23,24 @@ logger = get_logger("vllm_i64.server")
 
 class CompletionsMixin:
 
+    _THINK_RESPONSE_PREFILL = "<think>\n"
+
+    @classmethod
+    def _chat_response_prefill(cls, prompt: str) -> str:
+        """Restore a generation prefill in the assistant API content.
+
+        A chat template may end the prompt with ``<think>`` so the model starts
+        directly inside its reasoning envelope.  Because those tokens belong
+        to the prompt, generation APIs would otherwise omit the opening tag
+        while still returning ``</think>`` later in the response.
+        """
+
+        return (
+            cls._THINK_RESPONSE_PREFILL
+            if prompt.endswith(cls._THINK_RESPONSE_PREFILL)
+            else ""
+        )
+
     # ------------------------------------------------------------------
     # Core async generation
     # ------------------------------------------------------------------
@@ -159,7 +177,14 @@ class CompletionsMixin:
             "choices": [
                 {
                     "index": 0,
-                    "delta": {"role": "assistant", "content": ""},
+                    "delta": {
+                        "role": "assistant",
+                        "content": getattr(
+                            request,
+                            "_chat_response_prefill",
+                            "",
+                        ),
+                    },
                     "finish_reason": None,
                 }
             ],
@@ -385,6 +410,7 @@ class CompletionsMixin:
         req._pixel_values = pixel_values
         req._prompt_token_ids = prompt_ids
         req._context_metrics = context_metrics
+        req._chat_response_prefill = self._chat_response_prefill(prompt)
 
         error = req.validate(max_seq_len=max_seq_len, prompt_tokens=len(prompt_ids))
         if error:
@@ -412,6 +438,9 @@ class CompletionsMixin:
             result_dict = result.to_dict()
             if result_dict["choices"]:
                 text = result_dict["choices"][0]["text"]
+                response_prefill = getattr(req, "_chat_response_prefill", "")
+                if response_prefill and not text.startswith(response_prefill):
+                    text = response_prefill + text
                 finish_reason = result_dict["choices"][0].get("finish_reason", "length")
                 message = {"role": "assistant", "content": text}
                 tools = body.get("tools")
