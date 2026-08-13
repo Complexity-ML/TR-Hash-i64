@@ -478,6 +478,8 @@ async def test_chat_response_restores_think_generation_prefill(client, server):
     assert resp.status == 200
     content = (await resp.json())["choices"][0]["message"]["content"]
     assert content.startswith("<think>\n")
+    assert "</think>\n<final>\n" in content
+    assert content.endswith("</final>")
 
 
 @pytest.mark.asyncio
@@ -504,6 +506,33 @@ async def test_chat_stream_starts_with_think_generation_prefill(client, server):
         if line.startswith("data: {")
     ]
     assert events[0]["choices"][0]["delta"]["content"] == "<think>\n"
+    streamed = "".join(
+        event["choices"][0]["delta"].get("content", "")
+        for event in events
+    )
+    assert "</think>\n<final>\n" in streamed
+    assert streamed.endswith("</final>")
+
+
+@pytest.mark.asyncio
+async def test_chat_rejects_invalid_thinking_budget(client, server):
+    server.chat_template = (
+        "{% for message in messages %}"
+        "{{ message['role'] }}: {{ message['content'] }}\\n"
+        "{% endfor %}"
+        "{% if add_generation_prompt %}"
+        "{{ 'Assistant:\\n<think>\\n' }}"
+        "{% endif %}"
+    )
+
+    resp = await client.post("/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "Hello"}],
+        "max_tokens": 64,
+        "thinking_budget": 0,
+    })
+
+    assert resp.status == 400
+    assert "thinking_budget" in (await resp.json())["error"]["message"]
 
 
 @pytest.mark.asyncio

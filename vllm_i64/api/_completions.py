@@ -10,6 +10,7 @@ import hashlib
 import json
 import time
 import uuid
+from dataclasses import replace
 from typing import AsyncGenerator, Dict, List, Optional
 
 from aiohttp import web
@@ -24,6 +25,7 @@ logger = get_logger("vllm_i64.server")
 class CompletionsMixin:
 
     _THINK_RESPONSE_PREFILL = "<think>\n"
+    _THINK_FINAL_TRANSITION = "\n</think>\n<final>\n"
 
     @classmethod
     def _chat_response_prefill(cls, prompt: str) -> str:
@@ -216,6 +218,47 @@ class CompletionsMixin:
             if not token_text:
                 continue
             yield f"data: {json.dumps({'id': stream_id, 'object': 'chat.completion.chunk', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'content': token_text}, 'finish_reason': None}]})}\n\n"
+
+        response_prefill = getattr(request, "_chat_response_prefill", "")
+        if response_prefill and "</think>" not in prev_text:
+            transition = self._THINK_FINAL_TRANSITION
+            yield f"data: {json.dumps({'id': stream_id, 'object': 'chat.completion.chunk', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'content': transition}, 'finish_reason': None}]})}\n\n"
+
+            transition_ids = await self._tokenize_async(transition)
+            total_budget = getattr(request, "_chat_total_max_tokens", request.max_tokens)
+            remaining = total_budget - len(output_ids) - len(transition_ids)
+            final_text = ""
+            if remaining > 0:
+                continuation_prompt = request.prompt + prev_text + transition
+                continuation_ids = await self._tokenize_async(continuation_prompt)
+                available = self.sync_engine.scheduler.max_seq_len - len(continuation_ids)
+                final_budget = min(remaining, max(0, available))
+                if final_budget > 0:
+                    final_ids: List[int] = []
+                    async for item in self.async_engine.generate_stream(
+                        prompt_token_ids=continuation_ids,
+                        max_new_tokens=final_budget,
+                        sampling_params=request.to_sampling_params(tokenizer=self.tokenizer),
+                        pixel_values=pixel_values,
+                        cache_namespace=ns,
+                    ):
+                        if (
+                            isinstance(item, tuple)
+                            and len(item) == 2
+                            and item[0] == "__done__"
+                        ):
+                            finish_reason = item[1]
+                            break
+                        final_ids.append(item)
+                        decoded = self._detokenize(final_ids)
+                        token_text = decoded[len(final_text):]
+                        final_text = decoded
+                        if token_text:
+                            yield f"data: {json.dumps({'id': stream_id, 'object': 'chat.completion.chunk', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'content': token_text}, 'finish_reason': None}]})}\n\n"
+
+            if "</final>" not in final_text:
+                closing = "\n</final>"
+                yield f"data: {json.dumps({'id': stream_id, 'object': 'chat.completion.chunk', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'content': closing}, 'finish_reason': None}]})}\n\n"
 
         yield f"data: {json.dumps({'id': stream_id, 'object': 'chat.completion.chunk', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': finish_reason}]})}\n\n"
         yield "data: [DONE]\n\n"
@@ -415,6 +458,37 @@ class CompletionsMixin:
         error = req.validate(max_seq_len=max_seq_len, prompt_tokens=len(prompt_ids))
         if error:
             return web.json_response({"error": {"message": error, "type": "invalid_request_error"}}, status=400)
+        req._chat_total_max_tokens = req.max_tokens
+        if req._chat_response_prefill:
+            default_thinking_budget = min(
+                192,
+                max(32, req.max_tokens // 2),
+            )
+            try:
+                thinking_budget = int(
+                    body.get("thinking_budget", default_thinking_budget)
+                )
+            except (TypeError, ValueError):
+                return web.json_response(
+                    {
+                        "error": {
+                            "message": "thinking_budget must be an integer",
+                            "type": "invalid_request_error",
+                        }
+                    },
+                    status=400,
+                )
+            if thinking_budget < 1:
+                return web.json_response(
+                    {
+                        "error": {
+                            "message": "thinking_budget must be >= 1",
+                            "type": "invalid_request_error",
+                        }
+                    },
+                    status=400,
+                )
+            req.max_tokens = min(req.max_tokens, thinking_budget)
         self._context_tracker.record(context_metrics)
 
         auth = request.headers.get("Authorization", "")
@@ -437,10 +511,71 @@ class CompletionsMixin:
             result = await self._async_complete(req, api_key=req_api_key, endpoint="/v1/chat/completions")
             result_dict = result.to_dict()
             if result_dict["choices"]:
-                text = result_dict["choices"][0]["text"]
+                raw_text = result_dict["choices"][0]["text"]
                 response_prefill = getattr(req, "_chat_response_prefill", "")
-                if response_prefill and not text.startswith(response_prefill):
-                    text = response_prefill + text
+                text = raw_text
+                if response_prefill and not raw_text.startswith(response_prefill):
+                    text = response_prefill + raw_text
+
+                if response_prefill and "</think>" not in raw_text:
+                    transition = self._THINK_FINAL_TRANSITION
+                    transition_ids = await self._tokenize_async(transition)
+                    used = int(
+                        result_dict.get("usage", {}).get(
+                            "completion_tokens",
+                            0,
+                        )
+                    )
+                    total_budget = getattr(
+                        req,
+                        "_chat_total_max_tokens",
+                        req.max_tokens,
+                    )
+                    remaining = total_budget - used - len(transition_ids)
+                    final_text = ""
+                    follow_dict = None
+                    if remaining > 0:
+                        continuation_prompt = req.prompt + raw_text + transition
+                        continuation_ids = await self._tokenize_async(
+                            continuation_prompt
+                        )
+                        available = max_seq_len - len(continuation_ids)
+                        final_budget = min(remaining, max(0, available))
+                        if final_budget > 0:
+                            follow_request = replace(
+                                req,
+                                prompt=continuation_prompt,
+                                max_tokens=final_budget,
+                                stream=False,
+                            )
+                            follow_request._prompt_token_ids = continuation_ids
+                            follow_request._pixel_values = pixel_values
+                            follow_result = await self._async_complete(
+                                follow_request,
+                                api_key=req_api_key,
+                                endpoint="/v1/chat/completions/final",
+                            )
+                            follow_dict = follow_result.to_dict()
+                            if follow_dict["choices"]:
+                                final_text = follow_dict["choices"][0]["text"]
+
+                    text += transition + final_text
+                    if "</final>" not in final_text:
+                        text += "\n</final>"
+
+                    if follow_dict is not None:
+                        first_usage = result_dict.get("usage", {})
+                        follow_usage = follow_dict.get("usage", {})
+                        completion_tokens = (
+                            int(first_usage.get("completion_tokens", 0))
+                            + len(transition_ids)
+                            + int(follow_usage.get("completion_tokens", 0))
+                        )
+                        first_usage["completion_tokens"] = completion_tokens
+                        first_usage["total_tokens"] = (
+                            int(first_usage.get("prompt_tokens", len(prompt_ids)))
+                            + completion_tokens
+                        )
                 finish_reason = result_dict["choices"][0].get("finish_reason", "length")
                 message = {"role": "assistant", "content": text}
                 tools = body.get("tools")
