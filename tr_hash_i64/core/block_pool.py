@@ -248,12 +248,18 @@ class BlockPool:
         prev_hash: Optional[bytes] = None,
         namespace: Optional[bytes] = None,
     ) -> bytes:
-        """SHA-256 hash of a token block, chained from prev_hash.
+        """Fast non-cryptographic hash of a token block, chained from prev_hash.
+
+        This is a cache key, not a security boundary, so blake2b at a
+        reduced digest size (16 bytes -- still a 2^64 collision margin,
+        far beyond what a KV-cache block pool will ever hold) replaces
+        SHA-256: same chaining/namespacing semantics, meaningfully less
+        CPU per block on the hot prefix-caching path.
 
         namespace isolates the cache per API key — blocks from different
         keys never collide even if their token sequences are identical.
         """
-        h = hashlib.sha256()
+        h = hashlib.blake2b(digest_size=16)
         if namespace is not None:
             h.update(namespace)
         if prev_hash is not None:
