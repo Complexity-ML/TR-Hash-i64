@@ -370,6 +370,16 @@ def load_checkpoint(
     expert_up = {}
     expert_down_native = {}
 
+    # Prefixes whose full [top_k, vocab] table was already loaded verbatim
+    # from an explicit topk_token_to_expert checkpoint entry. The legacy
+    # token_to_expert branch below must not re-derive routes for these --
+    # _convert_framework_weights emits both keys for every converted layer
+    # (topk_token_to_expert first, token_to_expert as a redundant primary-
+    # route convenience copy), and without this guard the second entry's
+    # cyclic (primary + route_idx) % num_experts derivation clobbers the
+    # already-correct multi-hash secondary routes with a wrong guess.
+    topk_loaded_buffers: set[str] = set()
+
     for name, weight in state_dict.items():
         # Skip rotary inv_freq (computed at init)
         if "rotary_emb.inv_freq" in name:
@@ -398,6 +408,7 @@ def load_checkpoint(
             if buf_name in buffers:
                 buffers[buf_name].copy_(weight.long())
                 loaded.add(name)
+                topk_loaded_buffers.add(buf_name)
                 legacy_name = buf_name.replace(
                     "topk_token_to_expert", "token_to_expert"
                 )
@@ -405,7 +416,9 @@ def load_checkpoint(
                     buffers[legacy_name].copy_(weight[0].long())
             continue
 
-        # Legacy primary routing table (replicated).
+        # Legacy primary routing table (replicated). Only re-derives the
+        # other top_k routes cyclically when no explicit topk table was
+        # loaded for this prefix -- see topk_loaded_buffers above.
         if "token_to_expert" in name:
             buf_name = name.replace("model.", "", 1) if name not in buffers else name
             if buf_name in buffers:
@@ -414,7 +427,7 @@ def load_checkpoint(
                 topk_name = buf_name.replace(
                     "token_to_expert", "topk_token_to_expert"
                 )
-                if topk_name in buffers:
+                if topk_name in buffers and topk_name not in topk_loaded_buffers:
                     owner_path = topk_name.rsplit(".", 1)[0]
                     owner = _get_module_for_param(model, owner_path + ".dummy")
                     num_experts = getattr(owner, "num_experts", 1)
