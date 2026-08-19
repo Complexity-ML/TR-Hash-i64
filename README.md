@@ -1,6 +1,10 @@
-# vllm-i64
+# TR-Hash-i64
 
-Inference server for deterministic token-routed models from Complexity-ML:
+An independent inference server for deterministic token-routed models from
+Complexity-ML -- not a fork of, or affiliated with, the vLLM project. The
+Python package and CLI command are still named `vllm_i64` / `vllm-i64`
+internally (see Install/Serve below); only this repository's name has
+changed so far.
 
 - `tr-hash-moe-500m` → [`Pacific-i64/TR-HASH-MOE-500M-HF`](https://huggingface.co/Pacific-i64/TR-HASH-MOE-500M-HF)
 - `tr-moe-306` → [`Pacific-i64/TR-MOE-306`](https://huggingface.co/Pacific-i64/TR-MOE-306)
@@ -13,7 +17,7 @@ top-2 0.5/0.5 routing and applies the trained shared/routed output scales. The
 ## Install
 
 ```bash
-pip install git+https://github.com/Complexity-ML/vllm-i64.git@main
+pip install git+https://github.com/Complexity-ML/TR-Hash-i64.git@main
 ```
 
 ## Serve
