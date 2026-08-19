@@ -7,13 +7,11 @@ from tr_hash_i64.models.complexity_deep.model import (
     ComplexityDeepModel,
     ComplexityDecoderLayer,
     Attention,
-    MuGuidance,
-    MoEMLP,
     DenseSwiGLUMLP,
 )
 
 __all__ = [
     "ComplexityDeepConfig",
     "ComplexityDeepModel", "ComplexityDecoderLayer",
-    "Attention", "MuGuidance", "MoEMLP", "DenseSwiGLUMLP",
+    "Attention", "DenseSwiGLUMLP",
 ]

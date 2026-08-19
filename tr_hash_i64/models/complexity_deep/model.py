@@ -52,22 +52,6 @@ def apply_rotary(x, cos, sin):
 
 
 # =========================================================================
-# Mu-Guidance
-# =========================================================================
-
-class MuGuidance(nn.Module):
-    def __init__(self, hidden_size):
-        super().__init__()
-        self.mu = nn.Parameter(torch.ones(hidden_size))
-        self.mu_proj = nn.Linear(hidden_size, hidden_size, bias=False)
-        nn.init.zeros_(self.mu_proj.weight)
-
-    def forward(self, h):
-        mu_clamped = torch.clamp(self.mu, 0.0, 2.0)
-        return mu_clamped + self.mu_proj(h)
-
-
-# =========================================================================
 # Attention — uses tr-hash-i64 attention backends
 # =========================================================================
 
@@ -84,21 +68,6 @@ class Attention(nn.Module):
         self.k_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
         self.v_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
-
-        self.use_mu_guidance = (
-            getattr(config, "use_mu_guidance", False)
-            and not getattr(config, "disable_mu_guidance", False)
-        )
-        if self.use_mu_guidance:
-            self.mu_to_q = nn.Linear(
-                self.hidden_size, self.num_heads * self.head_dim, bias=False
-            )
-            self.mu_to_k = nn.Linear(
-                self.hidden_size, self.num_kv_heads * self.head_dim, bias=False
-            )
-            self.mu_to_v = nn.Linear(
-                self.hidden_size, self.num_kv_heads * self.head_dim, bias=False
-            )
 
         self.use_qk_norm = getattr(config, 'use_qk_norm', False)
         if self.use_qk_norm:
@@ -144,14 +113,13 @@ class Attention(nn.Module):
         del self.v_proj
         return True
 
-    def forward(self, hidden, positions, mu_prev=None,
+    def forward(self, hidden, positions,
                 kv_cache=None, layer_idx=0,
                 seq_ids=None, tokens_per_seq=None, **kwargs):
         """
         Args:
             hidden: [N, hidden_size] (flattened tokens)
             positions: [N] integer positions
-            mu_prev: [N, hidden_size] or None
             kv_cache: PagedKVCache or None
             tokens_per_seq: [num_seqs] token counts
         """
@@ -163,11 +131,6 @@ class Attention(nn.Module):
             q = self.q_proj(hidden)
             k = self.k_proj(hidden)
             v = self.v_proj(hidden)
-
-        if self.use_mu_guidance and mu_prev is not None:
-            q = q + self.mu_to_q(mu_prev)
-            k = k + self.mu_to_k(mu_prev)
-            v = v + self.mu_to_v(mu_prev)
 
         # Reshape: [N, heads, head_dim]
         q = q.view(bsz, self.num_heads, self.head_dim)
@@ -277,33 +240,6 @@ class DenseSwiGLUMLP(nn.Module):
 
 
 # =========================================================================
-# MoE MLP
-# =========================================================================
-
-class MoEMLP(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.tr_mlp = TokenRoutedMLP(
-            hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
-            num_experts=config.num_experts,
-            vocab_size=config.vocab_size,
-            shared_expert=getattr(config, 'shared_expert', False),
-            shared_intermediate_size=getattr(config, 'shared_intermediate_size', None) or 0,
-            top_k=getattr(config, 'top_k', 1),
-            top_k_primary_weight=getattr(config, 'top_k_primary_weight', None),
-            use_shared_routed_gates=getattr(config, 'use_shared_routed_gates', False),
-            shared_gate_init=getattr(config, 'shared_gate_init', 1.0),
-            routed_gate_init=getattr(config, 'routed_gate_init', 1.0),
-            shared_output_scale=getattr(config, 'shared_output_scale', 1.0),
-            routed_output_scale=getattr(config, 'routed_output_scale', 1.0),
-        )
-
-    def forward(self, x, token_ids=None, **kwargs):
-        return self.tr_mlp(x, token_ids=token_ids)
-
-
-# =========================================================================
 # Decoder Layer
 # =========================================================================
 
@@ -342,16 +278,12 @@ class ComplexityDecoderLayer(nn.Module):
         else:
             self.mlp = DenseSwiGLUMLP(config)
 
-        self.mu_guidance = None
-        if getattr(config, 'use_mu_guidance', False) and not getattr(config, 'disable_mu_guidance', False):
-            self.mu_guidance = MuGuidance(config.hidden_size)
-
-    def forward(self, hidden, positions, token_ids=None, mu_prev=None,
+    def forward(self, hidden, positions, token_ids=None,
                 kv_cache=None, layer_idx=0, seq_ids=None, tokens_per_seq=None, **kwargs):
         residual = hidden
         hidden = self.input_layernorm(hidden)
         hidden = self.self_attn(
-            hidden, positions, mu_prev=mu_prev,
+            hidden, positions,
             kv_cache=kv_cache, layer_idx=layer_idx,
             seq_ids=seq_ids, tokens_per_seq=tokens_per_seq,
         )
@@ -362,11 +294,7 @@ class ComplexityDecoderLayer(nn.Module):
         hidden = self.mlp(hidden, token_ids=token_ids)
         hidden = residual + hidden
 
-        mu_current = None
-        if self.mu_guidance is not None:
-            mu_current = self.mu_guidance(hidden)
-
-        return hidden, mu_current
+        return hidden
 
 
 # =========================================================================
@@ -381,10 +309,6 @@ class ComplexityDeepModel(nn.Module):
         self.layers = nn.ModuleList([ComplexityDecoderLayer(config) for _ in range(config.num_hidden_layers)])
         self.norm = nn.RMSNorm(config.hidden_size, eps=getattr(config, 'rms_norm_eps', 1e-6))
         self.tie_word_embeddings = getattr(config, 'tie_word_embeddings', True)
-
-        self._has_mu = getattr(config, 'use_mu_guidance', False)
-        if self._has_mu and not getattr(config, 'disable_mu_guidance', False):
-            self.mu_init = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
 
     def forward(self, token_ids, positions=None,
                 kv_cache=None, seq_ids=None, tokens_per_seq=None, **kwargs):
@@ -411,25 +335,17 @@ class ComplexityDeepModel(nn.Module):
             if tokens_per_seq is None:
                 tokens_per_seq = [token_ids.shape[0]]
 
-        N = token_ids.shape[0]
         hidden = self.embed_tokens(token_ids.long())
 
-        mu_prev = None
-        if self._has_mu and hasattr(self, 'mu_init'):
-            mu_prev = self.mu_init.view(1, -1).expand(N, -1)
-
         for i, layer in enumerate(self.layers):
-            hidden, mu_current = layer(
+            hidden = layer(
                 hidden, positions,
                 token_ids=token_ids,
-                mu_prev=mu_prev,
                 kv_cache=kv_cache,
                 layer_idx=i,
                 seq_ids=seq_ids,
                 tokens_per_seq=tokens_per_seq,
             )
-            if mu_current is not None:
-                mu_prev = torch.clamp(mu_current, -2.0, 2.0)
 
         hidden = self.norm(hidden)
 
@@ -442,15 +358,3 @@ class ComplexityDeepModel(nn.Module):
 
     def num_parameters(self):
         return sum(p.numel() for p in self.parameters())
-
-    def load_framework_checkpoint(self, state_dict: dict):
-        """Load weights from complexity-framework checkpoint format."""
-        mapped = {}
-        for k, v in state_dict.items():
-            new_key = k
-            # rotary_emb -> rope
-            new_key = new_key.replace("self_attn.rotary_emb.", "self_attn.rope.")
-            mapped[new_key] = v
-
-        missing, unexpected = self.load_state_dict(mapped, strict=False)
-        return missing, unexpected

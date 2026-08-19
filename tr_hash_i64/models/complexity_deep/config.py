@@ -69,14 +69,6 @@ class ComplexityDeepConfig:
     use_sdpa: bool = True
     sliding_window: Optional[int] = None
 
-
-    # Mu-Guidance
-    use_mu_guidance: bool = False       # Enable mu projection between layers
-
-    # Ablation flags (from training config)
-    disable_mu_guidance: bool = False   # run3-no-mu: skip mu→Q/K/V and mu routing
-
-
     @property
     def head_dim(self) -> int:
         return self.hidden_size // self.num_attention_heads
