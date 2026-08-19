@@ -1,5 +1,5 @@
 """
-vllm-i64 :: Test Safetensors Loading
+tr-hash-i64 :: Test Safetensors Loading
 
 Verifies multi-format checkpoint loading:
   - .safetensors single file
@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from safetensors.torch import save_file
 
-from vllm_i64.core.loader import (
+from tr_hash_i64.core.loader import (
     _load_safetensors_file,
     _load_pytorch_file,
     _load_sharded_safetensors,

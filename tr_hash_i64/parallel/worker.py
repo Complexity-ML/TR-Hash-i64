@@ -1,0 +1,197 @@
+"""
+tr-hash-i64 :: Distributed Worker
+
+Each worker process is launched by torchrun.
+Initializes distributed (TP + PP), loads the model shard, and serves.
+
+Only rank 0 runs the API server.
+Other ranks participate in TP compute via all_reduce
+and PP via send/recv.
+
+INL - 2025
+"""
+
+import logging
+import os
+import sys
+import torch
+
+logger = logging.getLogger("tr_hash_i64.worker")
+
+
+def main():
+    """Worker entry point — called by torchrun."""
+    from tr_hash_i64.parallel.tensor_parallel import init_distributed, get_tp
+    from tr_hash_i64.parallel.pipeline_parallel import init_pp, get_pp
+
+    tp_size = int(os.environ.get("TR_HASH_I64_TP_SIZE", "1"))
+    pp_size = int(os.environ.get("TR_HASH_I64_PP_SIZE", "1"))
+
+    init_distributed(tp_size=tp_size)
+    init_pp(pp_size=pp_size)
+
+    tp = get_tp()
+    pp = get_pp()
+
+    # Parse remaining args (same as CLI)
+    args = sys.argv[1:]
+    if not args:
+        if tp.tp_rank == 0 and pp.pp_rank == 0:
+            logger.error("Usage: worker <serve|bench> [args...]")
+        return
+
+    command = args[0]
+
+    if command == "serve":
+        _run_serve(args[1:], tp, pp)
+    elif command == "bench":
+        _run_bench(args[1:], tp, pp)
+    else:
+        if tp.tp_rank == 0 and pp.pp_rank == 0:
+            logger.error("Unknown command: %s", command)
+
+
+def _run_serve(args: list, tp, pp):
+    """Run the serve command in distributed mode."""
+    import argparse
+    from tr_hash_i64.core.loader import load_model_by_name, resolve_checkpoint_source
+    from tr_hash_i64.core.registry import get_model_entry
+    from tr_hash_i64.engine.i64_engine import I64Engine
+    from tr_hash_i64.core.tokenizer import load_tokenizer
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("model")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--dtype", default="float16")
+    parser.add_argument("--checkpoint", default=None)
+    parser.add_argument("--chat-template", default=None)
+    parser.add_argument("--quantization", default=None)
+    parsed = parser.parse_args(args)
+
+    dtype_map = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}
+    dtype = dtype_map[parsed.dtype]
+
+    if tp.tp_rank == 0 and pp.pp_rank == 0:
+        logger.info("tr-hash-i64 :: serving %s (TP=%d, PP=%d)", parsed.model, tp.tp_size, pp.pp_size)
+
+    # Each rank loads its shard (TP shards weights, PP shards layers)
+    entry = get_model_entry(parsed.model)
+    resolved_checkpoint = resolve_checkpoint_source(
+        parsed.checkpoint or entry.checkpoint
+    )
+    model = load_model_by_name(
+        parsed.model, dtype=dtype, device=tp.device,
+        checkpoint_override=resolved_checkpoint,
+        quantization=parsed.quantization,
+    )
+    model.eval()
+
+    engine = I64Engine(
+        model=model,
+        num_experts=getattr(model.config, 'num_experts', 1),
+        vocab_size=model.config.vocab_size,
+        device=tp.device,
+    )
+
+    if tp.tp_rank == 0 and pp.pp_rank == 0:
+        # Only global rank 0 runs the API server
+        from tr_hash_i64.api.server import I64Server
+
+        tokenizer = load_tokenizer(
+            parsed.model, checkpoint_path=resolved_checkpoint
+        )
+        chat_template = None
+        if parsed.chat_template:
+            with open(parsed.chat_template, encoding="utf-8") as f:
+                chat_template = f.read()
+        elif resolved_checkpoint:
+            from tr_hash_i64.core.chat_template import find_chat_template
+
+            chat_template = find_chat_template(resolved_checkpoint)
+
+        server = I64Server(
+            engine=engine,
+            tokenizer=tokenizer,
+            chat_template=chat_template,
+            model_name=parsed.model,
+            host=parsed.host,
+            port=parsed.port,
+        )
+        server.run()
+    else:
+        # Non-rank-0 workers: participate in TP/PP compute
+        _worker_loop(engine, tp, pp)
+
+
+def _worker_loop(engine, tp, pp):
+    """
+    Non-rank-0 worker loop.
+
+    Workers participate in TP compute by running the same forward passes
+    as rank 0. Coordination protocol:
+
+      1. Rank 0 broadcasts a control tensor: [opcode, batch_size, seq_len]
+         - opcode 0: shutdown
+         - opcode 1: forward step
+      2. Workers receive control, then broadcast tensor data (token_ids, positions)
+      3. Workers run the same model.forward() → NCCL all_reduce inside RowParallel
+      4. PP workers send/recv intermediate tensors between stages
+      5. Loop back to step 1
+
+    This replaces the barrier-only approach with real data synchronization.
+    """
+    import torch.distributed as dist
+
+    global_rank = tp.tp_rank + pp.pp_rank * tp.tp_size
+    if global_rank == 0:
+        return
+
+    logger.info("[Worker TP=%d PP=%d] ready, waiting for compute", tp.tp_rank, pp.pp_rank)
+
+    device = tp.device
+
+    while True:
+        try:
+            # 1. Receive control signal from rank 0
+            control = torch.zeros(3, dtype=torch.int64, device=device)
+            dist.broadcast(control, src=0, group=tp.tp_group)
+
+            opcode = control[0].item()
+            if opcode == 0:
+                # Shutdown
+                logger.info("[Worker TP=%d PP=%d] shutdown signal received", tp.tp_rank, pp.pp_rank)
+                break
+
+            batch_tokens = control[1].item()
+
+            # 2. Receive tensor data
+            token_ids = torch.zeros(batch_tokens, dtype=torch.int64, device=device)
+            positions = torch.zeros(batch_tokens, dtype=torch.int32, device=device)
+            dist.broadcast(token_ids, src=0, group=tp.tp_group)
+            dist.broadcast(positions, src=0, group=tp.tp_group)
+
+            # 3. Run forward pass (participates in all_reduce via RowParallel)
+            with torch.no_grad():
+                engine.model(token_ids=token_ids, positions=positions)
+
+        except Exception as e:
+            logger.error("[Worker TP=%d PP=%d] error: %s", tp.tp_rank, pp.pp_rank, e)
+            break
+
+    logger.info("[Worker TP=%d PP=%d] exiting", tp.tp_rank, pp.pp_rank)
+
+
+def _run_bench(args: list, tp, pp):
+    """Run benchmarks in distributed mode."""
+    if tp.tp_rank == 0 and pp.pp_rank == 0:
+        from tr_hash_i64.cli import cmd_bench
+        import argparse
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--num-experts", type=int, default=4)
+        parsed = parser.parse_args(args)
+        cmd_bench(parsed)
+
+
+if __name__ == "__main__":
+    main()

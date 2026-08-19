@@ -11,9 +11,9 @@ from unittest.mock import patch, MagicMock
 from types import SimpleNamespace
 from pathlib import Path
 
-from vllm_i64.engine.config import EngineConfig
-from vllm_i64.engine.sampler import I64Sampler
-from vllm_i64.core.sampling import SamplingParams
+from tr_hash_i64.engine.config import EngineConfig
+from tr_hash_i64.engine.sampler import I64Sampler
+from tr_hash_i64.core.sampling import SamplingParams
 
 
 # =========================================================================
@@ -163,7 +163,7 @@ class TestCmdEstimate:
             max_seq_len=2048,
         )
 
-        from vllm_i64.cli import cmd_estimate
+        from tr_hash_i64.cli import cmd_estimate
         # Should run without error and print output
         with patch('builtins.print') as mock_print:
             cmd_estimate(args)
@@ -182,7 +182,7 @@ class TestCmdEstimate:
             max_batch_size=8,
             max_seq_len=2048,
         )
-        from vllm_i64.cli import cmd_estimate
+        from tr_hash_i64.cli import cmd_estimate
         with pytest.raises(SystemExit):
             cmd_estimate(args)
 
@@ -209,7 +209,7 @@ class TestCmdEstimate:
             max_seq_len=4096,
         )
 
-        from vllm_i64.cli import cmd_estimate
+        from tr_hash_i64.cli import cmd_estimate
         with patch('builtins.print') as mock_print:
             cmd_estimate(args)
         output = " ".join(str(c) for c in mock_print.call_args_list)

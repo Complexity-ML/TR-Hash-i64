@@ -1,5 +1,5 @@
 /**
- * vllm-i64 :: I64_rope.cu
+ * tr-hash-i64 :: I64_rope.cu
  *
  * CUDA kernel: fused rotary position embedding.
  *

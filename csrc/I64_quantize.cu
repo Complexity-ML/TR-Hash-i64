@@ -1,5 +1,5 @@
 /**
- * vllm-i64 :: I64_quantize.cu
+ * tr-hash-i64 :: I64_quantize.cu
  *
  * CUDA kernels: activation quantization (INT8 and FP8).
  *

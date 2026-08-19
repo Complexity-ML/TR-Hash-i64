@@ -1,5 +1,5 @@
 /**
- * vllm-i64 :: PyTorch C++ Extension Binding
+ * tr-hash-i64 :: PyTorch C++ Extension Binding
  *
  * Bridges the i64 CUDA kernels to PyTorch tensor operations.
  * Uses torch::Tensor for automatic memory management and device handling.
@@ -397,7 +397,7 @@ fused_route_scatter(torch::Tensor token_ids, torch::Tensor hidden, int64_t num_e
 // Module registration
 // =========================================================================
 
-TORCH_LIBRARY(vllm_i64, m) {
+TORCH_LIBRARY(tr_hash_i64, m) {
     m.def("route_tokens", &route_tokens);
     m.def("silu_hadamard", &silu_hadamard);
     m.def("scatter_by_expert", &scatter_by_expert);

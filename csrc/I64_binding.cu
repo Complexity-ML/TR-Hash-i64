@@ -1,5 +1,5 @@
 /**
- * vllm-i64 :: I64_binding.cu
+ * tr-hash-i64 :: I64_binding.cu
  *
  * Unified PyTorch C++ extension binding for all I64 GPU kernels.
  *
@@ -47,7 +47,7 @@ torch::Tensor I64_gemm_silu_int8(
 
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.doc() = "vllm-i64 GPU kernels — integer-first inference";
+    m.doc() = "tr-hash-i64 GPU kernels — integer-first inference";
 
     // RMSNorm
     m.def("rmsnorm_forward", &I64_rmsnorm_forward,

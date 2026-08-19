@@ -1,5 +1,5 @@
 /**
- * vllm-i64 :: Expert Dispatch Kernel
+ * tr-hash-i64 :: Expert Dispatch Kernel
  *
  * Batched SwiGLU MLP for token-routed experts.
  * Each expert processes its assigned tokens via fused gate+up matmul.

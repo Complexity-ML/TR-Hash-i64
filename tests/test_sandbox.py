@@ -1,7 +1,7 @@
 """Tests for sandbox executor security restrictions."""
 
 import pytest
-from vllm_i64.sandbox.executor import (
+from tr_hash_i64.sandbox.executor import (
     Sandbox,
     ExecutionResult,
     _validate_python_ast,

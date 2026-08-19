@@ -1,5 +1,5 @@
 """
-vllm-i64 :: Test New Features
+tr-hash-i64 :: Test New Features
 
 Tests for all features added in the latest update:
   - Logprobs (sample_batch_with_logprobs, _gather_logprobs)
@@ -26,15 +26,15 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from vllm_i64.core.sampling import (
+from tr_hash_i64.core.sampling import (
     SamplingParams, sample_batch_with_logprobs, _gather_logprobs,
     TokenLogprob, SampleOutput,
 )
-from vllm_i64.api.server import CompletionRequest, TokenBucketRateLimiter
-from vllm_i64.core.kv_cache import PagedKVCache
-from vllm_i64.layers.attention import naive_paged_decode_attention
-from vllm_i64.engine.i64_engine import AdaptiveBatchSizer
-from vllm_i64.core.tool_parser import ToolCallParser, ToolCall
+from tr_hash_i64.api.server import CompletionRequest, TokenBucketRateLimiter
+from tr_hash_i64.core.kv_cache import PagedKVCache
+from tr_hash_i64.layers.attention import naive_paged_decode_attention
+from tr_hash_i64.engine.i64_engine import AdaptiveBatchSizer
+from tr_hash_i64.core.tool_parser import ToolCallParser, ToolCall
 
 
 # =========================================================================

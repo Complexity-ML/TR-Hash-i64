@@ -1,5 +1,5 @@
 """
-Tests for vllm-i64 performance features:
+Tests for tr-hash-i64 performance features:
   - Batched repetition penalty (WI-1)
   - FP8 KV cache quantization (WI-2)
   - Multi-batch CUDA graphs (WI-3)
@@ -14,13 +14,13 @@ import pytest
 import torch
 import numpy as np
 
-from vllm_i64.core.sampling import (
+from tr_hash_i64.core.sampling import (
     SamplingParams,
     sample_batch,
     apply_repetition_penalty_batch,
 )
-from vllm_i64.core.kv_cache import PagedKVCache
-from vllm_i64.engine.i64_engine import I64Engine
+from tr_hash_i64.core.kv_cache import PagedKVCache
+from tr_hash_i64.engine.i64_engine import I64Engine
 
 
 # =========================================================================
@@ -175,7 +175,7 @@ class TestFP8KVCache:
 
 class TestMultiBatchCUDAGraphs:
     def test_find_best_size(self):
-        from vllm_i64.core.cuda_graph import CUDAGraphRunner
+        from tr_hash_i64.core.cuda_graph import CUDAGraphRunner
 
         runner = CUDAGraphRunner(lambda t, p, e: t, max_batch_size=32)
         runner._captured_sizes = {1, 4, 8, 16}
@@ -188,7 +188,7 @@ class TestMultiBatchCUDAGraphs:
         assert runner._find_best_size(17) is None
 
     def test_uncaptured_falls_back(self):
-        from vllm_i64.core.cuda_graph import CUDAGraphRunner
+        from tr_hash_i64.core.cuda_graph import CUDAGraphRunner
 
         called = []
         def fake_forward(t, p, e):
@@ -208,7 +208,7 @@ class TestMultiBatchCUDAGraphs:
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
     def test_capture_common_sizes(self):
-        from vllm_i64.core.cuda_graph import CUDAGraphRunner
+        from tr_hash_i64.core.cuda_graph import CUDAGraphRunner
 
         def fake_forward(t, p, e):
             return torch.randn(t.shape[0], 50, device=t.device)
@@ -285,7 +285,7 @@ class TestSpeculativeIntegration:
 
     def test_speculative_step_produces_tokens(self):
         """Speculative decoder should produce accepted tokens."""
-        from vllm_i64.core.speculative import SpeculativeDecoder
+        from tr_hash_i64.core.speculative import SpeculativeDecoder
 
         class FakeModel:
             def __call__(self, token_ids, positions=None):
@@ -328,7 +328,7 @@ class TestCUDAGraphActivation:
 class TestCLIFlags:
     def test_serve_parser_has_new_flags(self):
         import argparse
-        from vllm_i64.cli import main
+        from tr_hash_i64.cli import main
 
         # Just verify the parser accepts the new flags without error
         parser = argparse.ArgumentParser()

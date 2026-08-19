@@ -2,10 +2,10 @@
 
 import pytest
 
-from vllm_i64.api.tracking import ContextMetricsTracker
-from vllm_i64.api.types import CompletionRequest
-from vllm_i64.api._helpers import HelpersMixin
-from vllm_i64.core.context_manager import (
+from tr_hash_i64.api.tracking import ContextMetricsTracker
+from tr_hash_i64.api.types import CompletionRequest
+from tr_hash_i64.api._helpers import HelpersMixin
+from tr_hash_i64.core.context_manager import (
     ContextManager,
     ContextWindowError,
     sanitize_assistant_reasoning,

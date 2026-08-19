@@ -1,5 +1,5 @@
 """
-vllm-i64 :: Test Tensor Parallelism (Single-Rank)
+tr-hash-i64 :: Test Tensor Parallelism (Single-Rank)
 
 Tests TP primitives with tp_size=1 (no distributed required):
   - ColumnParallelLinear shape and load_full_weight
@@ -18,7 +18,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from vllm_i64.parallel.tensor_parallel import (
+from tr_hash_i64.parallel.tensor_parallel import (
     TPState,
     ColumnParallelLinear,
     RowParallelLinear,
@@ -109,8 +109,8 @@ class TestTPState:
 
 class TestModelWithTP:
     def test_model_creates_tp_layers(self):
-        from vllm_i64.models.complexity_deep.config import ComplexityDeepConfig
-        from vllm_i64.models.complexity_deep.model import ComplexityDeepModel
+        from tr_hash_i64.models.complexity_deep.config import ComplexityDeepConfig
+        from tr_hash_i64.models.complexity_deep.model import ComplexityDeepModel
 
         config = ComplexityDeepConfig(
             hidden_size=64, num_hidden_layers=1, num_attention_heads=2,
@@ -127,8 +127,8 @@ class TestModelWithTP:
         assert isinstance(attn.o_proj, torch.nn.Linear)
 
     def test_forward_with_tp_layers(self):
-        from vllm_i64.models.complexity_deep.config import ComplexityDeepConfig
-        from vllm_i64.models.complexity_deep.model import ComplexityDeepModel
+        from tr_hash_i64.models.complexity_deep.config import ComplexityDeepConfig
+        from tr_hash_i64.models.complexity_deep.model import ComplexityDeepModel
 
         config = ComplexityDeepConfig(
             hidden_size=64, num_hidden_layers=1, num_attention_heads=2,

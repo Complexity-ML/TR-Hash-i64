@@ -1,5 +1,5 @@
 """
-vllm-i64 :: Test Attention Backends
+tr-hash-i64 :: Test Attention Backends
 
 Tests for FlashAttention integration and naive fallback:
   - naive_varlen_attention correctness (single/multi sequence, GQA, causal)
@@ -20,13 +20,13 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from vllm_i64.layers.attention import (
+from tr_hash_i64.layers.attention import (
     is_flash_attn_available,
     naive_varlen_attention,
     naive_cached_attention,
     compute_cu_seqlens,
 )
-from vllm_i64.core.kv_cache import PagedKVCache
+from tr_hash_i64.core.kv_cache import PagedKVCache
 
 
 class TestComputeCuSeqlens:
@@ -254,8 +254,8 @@ class TestModelAttentionIntegration:
 
     def test_model_forward_unchanged(self):
         """ComplexityDeepModel forward pass still works."""
-        from vllm_i64.models.complexity_deep.config import ComplexityDeepConfig
-        from vllm_i64.models.complexity_deep.model import ComplexityDeepModel
+        from tr_hash_i64.models.complexity_deep.config import ComplexityDeepConfig
+        from tr_hash_i64.models.complexity_deep.model import ComplexityDeepModel
 
         config = ComplexityDeepConfig(
             vocab_size=100, hidden_size=64, num_hidden_layers=2,
@@ -274,8 +274,8 @@ class TestModelAttentionIntegration:
 
     def test_model_single_token(self):
         """Single token forward pass works."""
-        from vllm_i64.models.complexity_deep.config import ComplexityDeepConfig
-        from vllm_i64.models.complexity_deep.model import ComplexityDeepModel
+        from tr_hash_i64.models.complexity_deep.config import ComplexityDeepConfig
+        from tr_hash_i64.models.complexity_deep.model import ComplexityDeepModel
 
         config = ComplexityDeepConfig(
             vocab_size=100, hidden_size=64, num_hidden_layers=2,
@@ -294,8 +294,8 @@ class TestModelAttentionIntegration:
 
     def test_model_deterministic(self):
         """Model should be deterministic."""
-        from vllm_i64.models.complexity_deep.config import ComplexityDeepConfig
-        from vllm_i64.models.complexity_deep.model import ComplexityDeepModel
+        from tr_hash_i64.models.complexity_deep.config import ComplexityDeepConfig
+        from tr_hash_i64.models.complexity_deep.model import ComplexityDeepModel
 
         config = ComplexityDeepConfig(
             vocab_size=100, hidden_size=64, num_hidden_layers=2,

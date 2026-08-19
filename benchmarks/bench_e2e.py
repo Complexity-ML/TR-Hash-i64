@@ -1,5 +1,5 @@
 """
-vllm-i64 :: End-to-End Benchmark
+tr-hash-i64 :: End-to-End Benchmark
 
 Measures real inference throughput:
   - Prompt processing (prefill) tok/s
@@ -141,12 +141,12 @@ def bench_generation(
 
 
 if __name__ == "__main__":
-    from vllm_i64.models.complexity_deep.config import ComplexityDeepConfig
-    from vllm_i64.models.complexity_deep.model import ComplexityDeepModel
-    from vllm_i64.engine.i64_engine import I64Engine
+    from tr_hash_i64.models.complexity_deep.config import ComplexityDeepConfig
+    from tr_hash_i64.models.complexity_deep.model import ComplexityDeepModel
+    from tr_hash_i64.engine.i64_engine import I64Engine
 
     print("=" * 60)
-    print("vllm-i64 :: End-to-End Benchmark")
+    print("tr-hash-i64 :: End-to-End Benchmark")
     print("=" * 60)
 
     # Small model for CPU benchmarking

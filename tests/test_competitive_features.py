@@ -1,5 +1,5 @@
 """
-vllm-i64 :: Test Competitive Features
+tr-hash-i64 :: Test Competitive Features
 
 Tests for all new competitive features:
   - Production hardening (timeouts, cancellation, logging)
@@ -26,19 +26,19 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from vllm_i64.engine.i64_scheduler import (
+from tr_hash_i64.engine.i64_scheduler import (
     I64Scheduler, I64Request, I64Batch, RequestStatus,
 )
-from vllm_i64.engine.i64_engine import I64Engine, AsyncI64Engine, GenerationResult
-from vllm_i64.core.kv_cache import PagedKVCache
-from vllm_i64.core.sampling import SamplingParams, BeamSearcher, BeamHypothesis
-from vllm_i64.core.logits_processor import (
+from tr_hash_i64.engine.i64_engine import I64Engine, AsyncI64Engine, GenerationResult
+from tr_hash_i64.core.kv_cache import PagedKVCache
+from tr_hash_i64.core.sampling import SamplingParams, BeamSearcher, BeamHypothesis
+from tr_hash_i64.core.logits_processor import (
     JSONLogitsProcessor, StopSequenceProcessor, ChoiceLogitsProcessor,
     OutputConstraints, apply_logits_processors,
 )
-from vllm_i64.core.logging import setup_logging, get_logger, RequestLogger
-from vllm_i64.layers.lora import LoRALinear, LoRAManager
-from vllm_i64.kernels.kernel_loader import FallbackOps
+from tr_hash_i64.core.logging import setup_logging, get_logger, RequestLogger
+from tr_hash_i64.layers.lora import LoRALinear, LoRAManager
+from tr_hash_i64.kernels.kernel_loader import FallbackOps
 
 
 # =========================================================================
@@ -49,7 +49,7 @@ class TestStructuredLogging:
 
     def test_logger_creation(self):
         logger = setup_logging(level="DEBUG")
-        assert logger.name == "vllm_i64"
+        assert logger.name == "tr_hash_i64"
         assert logger.level == 10  # DEBUG
 
     def test_request_logger(self):

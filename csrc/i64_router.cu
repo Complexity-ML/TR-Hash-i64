@@ -1,5 +1,5 @@
 /**
- * vllm-i64 :: i64 Router Kernel
+ * tr-hash-i64 :: i64 Router Kernel
  *
  * Integer-only token routing on GPU.
  * Replaces all float-based MoE routing with pure i64 operations.

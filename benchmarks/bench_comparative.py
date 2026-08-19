@@ -1,10 +1,10 @@
 """
-vllm-i64 :: Comparative Benchmark
+tr-hash-i64 :: Comparative Benchmark
 
-Compares vllm-i64 throughput and latency against other inference engines.
+Compares tr-hash-i64 throughput and latency against other inference engines.
 
 Modes:
-  1. Self-benchmark: measure vllm-i64 standalone throughput
+  1. Self-benchmark: measure tr-hash-i64 standalone throughput
   2. Comparative: if vLLM/TGI API is available, compare side-by-side
 
 Metrics:
@@ -53,12 +53,12 @@ class BenchmarkConfig:
     warmup_requests: int = 5
 
 
-def bench_vllm_i64_sync(config: BenchmarkConfig) -> BenchmarkResult:
-    """Benchmark vllm-i64 with synchronous engine."""
+def bench_tr_hash_i64_sync(config: BenchmarkConfig) -> BenchmarkResult:
+    """Benchmark tr-hash-i64 with synchronous engine."""
     import torch
     import numpy as np
-    from vllm_i64.engine.i64_engine import I64Engine
-    from vllm_i64.core.sampling import SamplingParams
+    from tr_hash_i64.engine.i64_engine import I64Engine
+    from tr_hash_i64.core.sampling import SamplingParams
 
     engine = I64Engine(
         num_experts=4,
@@ -122,7 +122,7 @@ def bench_vllm_i64_sync(config: BenchmarkConfig) -> BenchmarkResult:
     total_time = time.perf_counter() - start
 
     return BenchmarkResult(
-        engine="vllm-i64",
+        engine="tr-hash-i64",
         num_requests=config.num_requests,
         prompt_len=config.prompt_len,
         output_len=config.output_len,
@@ -134,11 +134,11 @@ def bench_vllm_i64_sync(config: BenchmarkConfig) -> BenchmarkResult:
     )
 
 
-async def bench_vllm_i64_async(config: BenchmarkConfig) -> BenchmarkResult:
-    """Benchmark vllm-i64 with async continuous batching engine."""
+async def bench_tr_hash_i64_async(config: BenchmarkConfig) -> BenchmarkResult:
+    """Benchmark tr-hash-i64 with async continuous batching engine."""
     import torch
-    from vllm_i64.engine.i64_engine import I64Engine, AsyncI64Engine
-    from vllm_i64.core.sampling import SamplingParams
+    from tr_hash_i64.engine.i64_engine import I64Engine, AsyncI64Engine
+    from tr_hash_i64.core.sampling import SamplingParams
 
     engine = AsyncI64Engine(
         num_experts=4,
@@ -183,7 +183,7 @@ async def bench_vllm_i64_async(config: BenchmarkConfig) -> BenchmarkResult:
     await engine.stop()
 
     return BenchmarkResult(
-        engine="vllm-i64 (async)",
+        engine="tr-hash-i64 (async)",
         num_requests=config.num_requests,
         prompt_len=config.prompt_len,
         output_len=config.output_len,
@@ -267,7 +267,7 @@ async def bench_external_api(
 def print_results(results: List[BenchmarkResult]):
     """Pretty-print benchmark comparison table."""
     print("\n" + "=" * 80)
-    print("  vllm-i64 :: Comparative Benchmark Results")
+    print("  tr-hash-i64 :: Comparative Benchmark Results")
     print("=" * 80)
 
     header = f"{'Engine':<25} {'Requests':>8} {'Prompt':>6} {'Output':>6} {'TTFT ms':>8} {'ITL ms':>8} {'Tok/s':>10} {'Total s':>8}"
@@ -304,7 +304,7 @@ async def main():
     """Run comparative benchmarks."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="vllm-i64 Comparative Benchmark")
+    parser = argparse.ArgumentParser(description="tr-hash-i64 Comparative Benchmark")
     parser.add_argument("--requests", type=int, default=50, help="Number of requests")
     parser.add_argument("--prompt-len", type=int, default=64, help="Prompt length (tokens)")
     parser.add_argument("--output-len", type=int, default=64, help="Output length (tokens)")
@@ -322,14 +322,14 @@ async def main():
 
     results = []
 
-    # vllm-i64 sync
-    print(f"Running vllm-i64 sync benchmark ({config.num_requests} requests)...")
-    r_sync = bench_vllm_i64_sync(config)
+    # tr-hash-i64 sync
+    print(f"Running tr-hash-i64 sync benchmark ({config.num_requests} requests)...")
+    r_sync = bench_tr_hash_i64_sync(config)
     results.append(r_sync)
 
-    # vllm-i64 async
-    print(f"Running vllm-i64 async benchmark ({config.num_requests} requests)...")
-    r_async = await bench_vllm_i64_async(config)
+    # tr-hash-i64 async
+    print(f"Running tr-hash-i64 async benchmark ({config.num_requests} requests)...")
+    r_async = await bench_tr_hash_i64_async(config)
     results.append(r_async)
 
     # External engines

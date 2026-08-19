@@ -1,5 +1,5 @@
 """
-vllm-i64 :: Test Weight Loader + Config
+tr-hash-i64 :: Test Weight Loader + Config
 
 Tests:
   - ComplexityDeepConfig.from_json() parsing
@@ -21,10 +21,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from vllm_i64.models.complexity_deep.config import ComplexityDeepConfig
-from vllm_i64.models.complexity_deep.model import ComplexityDeepModel
-from vllm_i64.core.loader import load_checkpoint, _get_module_for_param
-from vllm_i64.parallel.tensor_parallel import ColumnParallelLinear, RowParallelLinear
+from tr_hash_i64.models.complexity_deep.config import ComplexityDeepConfig
+from tr_hash_i64.models.complexity_deep.model import ComplexityDeepModel
+from tr_hash_i64.core.loader import load_checkpoint, _get_module_for_param
+from tr_hash_i64.parallel.tensor_parallel import ColumnParallelLinear, RowParallelLinear
 
 
 class TestComplexityDeepConfig:
@@ -114,7 +114,7 @@ class TestComplexityDeepConfig:
 
 class TestPublicRegistry:
     def test_public_models_include_tr_hash_500m(self):
-        from vllm_i64.core.registry import list_models
+        from tr_hash_i64.core.registry import list_models
 
         assert [item["name"] for item in list_models()] == [
             "tr-hash-moe-500m",
@@ -123,7 +123,7 @@ class TestPublicRegistry:
         ]
 
     def test_tr_hash_500m_registry_entry(self):
-        from vllm_i64.core.registry import get_model_entry
+        from tr_hash_i64.core.registry import get_model_entry
 
         entry = get_model_entry("tr-hash-moe-500m")
         assert entry.checkpoint == "Pacific-i64/TR-HASH-MOE-500M-HF"

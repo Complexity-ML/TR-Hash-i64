@@ -2,7 +2,7 @@
 
 An independent inference server for deterministic token-routed models from
 Complexity-ML -- not a fork of, or affiliated with, the vLLM project. The
-Python package and CLI command are still named `vllm_i64` / `vllm-i64`
+Python package and CLI command are still named `tr_hash_i64` / `tr-hash-i64`
 internally (see Install/Serve below); only this repository's name has
 changed so far.
 
@@ -25,7 +25,7 @@ pip install git+https://github.com/Complexity-ML/TR-Hash-i64.git@main
 The model snapshot is downloaded automatically from Hugging Face:
 
 ```bash
-vllm-i64 serve tr-hash-moe-500m \
+tr-hash-i64 serve tr-hash-moe-500m \
   --host 0.0.0.0 \
   --port 7860 \
   --quantization none
@@ -35,7 +35,7 @@ Use `dense-306` for the matched dense baseline. A local directory can replace
 the Hub snapshot:
 
 ```bash
-vllm-i64 serve dense-306 \
+tr-hash-i64 serve dense-306 \
   --checkpoint /models/Dense-306 \
   --port 7860
 ```
@@ -45,8 +45,8 @@ with the PyTorch x86/FBGEMM backend while leaving the token-routing tables as
 integers:
 
 ```bash
-VLLM_I64_CPU_THREADS=8 \
-vllm-i64 serve tr-moe-306 \
+TR_HASH_I64_CPU_THREADS=8 \
+tr-hash-i64 serve tr-moe-306 \
   --port 7860 \
   --quantization int8 \
   --max-batch-size 4 \
@@ -134,7 +134,7 @@ exact total-token validation.
 ## Verify
 
 ```bash
-vllm-i64 list
+tr-hash-i64 list
 python -m pytest -q
 ```
 

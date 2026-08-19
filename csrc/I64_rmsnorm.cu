@@ -1,5 +1,5 @@
 /**
- * vllm-i64 :: I64_rmsnorm.cu
+ * tr-hash-i64 :: I64_rmsnorm.cu
  *
  * CUDA kernel: fused RMSNorm + optional INT8 quantization.
  *

@@ -1,5 +1,5 @@
 """
-vllm-i64 :: Sampling Tests
+tr-hash-i64 :: Sampling Tests
 INL - 2025
 """
 import pytest
@@ -7,7 +7,7 @@ import torch
 import sys, os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from vllm_i64.core.sampling import (
+from tr_hash_i64.core.sampling import (
     SamplingParams,
     SampleOutput,
     TokenLogprob,

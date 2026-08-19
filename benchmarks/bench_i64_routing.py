@@ -1,5 +1,5 @@
 """
-vllm-i64 :: Routing Benchmark
+tr-hash-i64 :: Routing Benchmark
 
 Compare i64 routing vs float-based MoE routing.
 
@@ -12,7 +12,7 @@ INL - 2025
 import torch
 import time
 import numpy as np
-from vllm_i64.kernels.i64_ops import i64_route_tokens, i64_full_pipeline
+from tr_hash_i64.kernels.i64_ops import i64_route_tokens, i64_full_pipeline
 
 
 def bench_i64_routing(num_tokens: int, num_experts: int, n_iters: int = 1000):
@@ -100,7 +100,7 @@ def bench_full_pipeline(num_tokens: int, hidden_dim: int = 768, num_experts: int
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("vllm-i64 :: Routing Benchmark")
+    print("tr-hash-i64 :: Routing Benchmark")
     print("=" * 60)
 
     # --- Routing comparison ---

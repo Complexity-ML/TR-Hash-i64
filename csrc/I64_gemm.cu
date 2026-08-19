@@ -1,5 +1,5 @@
 /**
- * vllm-i64 :: I64_gemm.cu
+ * tr-hash-i64 :: I64_gemm.cu
  *
  * CUDA kernels: fused dequant+GEMM for INT8 and FP8 weights.
  *

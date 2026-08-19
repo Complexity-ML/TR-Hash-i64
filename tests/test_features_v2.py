@@ -1,5 +1,5 @@
 """
-vllm-i64 :: Test Features V2
+tr-hash-i64 :: Test Features V2
 
 Tests for the second batch of features:
   - Sliding window attention
@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # 1. Sliding Window Attention
 # =====================================================================
 
-from vllm_i64.layers.attention import naive_varlen_attention, naive_cached_attention
+from tr_hash_i64.layers.attention import naive_varlen_attention, naive_cached_attention
 
 
 class TestSlidingWindowAttention:
@@ -123,7 +123,7 @@ class TestSlidingWindowAttention:
 # 2. Load Shedding
 # =====================================================================
 
-from vllm_i64.api.server import I64Server, TokenBucketRateLimiter
+from tr_hash_i64.api.server import I64Server, TokenBucketRateLimiter
 
 
 class TestLoadShedding:
@@ -131,21 +131,21 @@ class TestLoadShedding:
 
     def test_max_pending_stored(self):
         """max_pending is stored on server."""
-        from vllm_i64.engine.i64_engine import I64Engine
+        from tr_hash_i64.engine.i64_engine import I64Engine
         engine = I64Engine(model=None, num_experts=4, vocab_size=100, device="cpu")
         server = I64Server(engine=engine, max_pending=50)
         assert server._max_pending == 50
 
     def test_max_pending_zero_means_unlimited(self):
         """max_pending=0 means no load shedding."""
-        from vllm_i64.engine.i64_engine import I64Engine
+        from tr_hash_i64.engine.i64_engine import I64Engine
         engine = I64Engine(model=None, num_experts=4, vocab_size=100, device="cpu")
         server = I64Server(engine=engine, max_pending=0)
         assert server._max_pending == 0
 
     def test_load_shed_middleware_registered(self):
         """Load shed middleware is registered when max_pending > 0."""
-        from vllm_i64.engine.i64_engine import I64Engine
+        from tr_hash_i64.engine.i64_engine import I64Engine
         engine = I64Engine(model=None, num_experts=4, vocab_size=100, device="cpu")
         server = I64Server(engine=engine, max_pending=10)
         app = server.create_app()
@@ -157,7 +157,7 @@ class TestLoadShedding:
 # 3. Request Deduplication
 # =====================================================================
 
-from vllm_i64.api.server import RequestCache
+from tr_hash_i64.api.server import RequestCache
 
 
 class TestRequestCache:
@@ -250,7 +250,7 @@ class TestEmbeddings:
         model = MockModel()
         model.eval()
 
-        from vllm_i64.engine.i64_engine import I64Engine
+        from tr_hash_i64.engine.i64_engine import I64Engine
         engine = I64Engine(model=model, num_experts=4, vocab_size=100, device="cpu")
         embedding = engine.embed([1, 2, 3, 4])
 
@@ -260,7 +260,7 @@ class TestEmbeddings:
 
     def test_embed_no_model_raises(self):
         """embed() raises when no model loaded."""
-        from vllm_i64.engine.i64_engine import I64Engine
+        from tr_hash_i64.engine.i64_engine import I64Engine
         engine = I64Engine(model=None, num_experts=4, vocab_size=100, device="cpu")
         with pytest.raises(RuntimeError):
             engine.embed([1, 2, 3])
@@ -292,7 +292,7 @@ class TestEmbeddings:
         model = MockModel()
         model.eval()
 
-        from vllm_i64.engine.i64_engine import I64Engine
+        from tr_hash_i64.engine.i64_engine import I64Engine
         engine = I64Engine(model=model, num_experts=4, vocab_size=100, device="cpu")
         e1 = engine.embed([10, 20, 30])
         e2 = engine.embed([10, 20, 30])
@@ -303,7 +303,7 @@ class TestEmbeddings:
 # 5. Usage Tracking
 # =====================================================================
 
-from vllm_i64.api.server import UsageTracker
+from tr_hash_i64.api.server import UsageTracker
 
 
 class TestUsageTracker:
@@ -360,7 +360,7 @@ class TestUsageTracker:
 # 6. LoRA Adapter Serving
 # =====================================================================
 
-from vllm_i64.layers.lora import LoRALinear, LoRAManager
+from tr_hash_i64.layers.lora import LoRALinear, LoRAManager
 
 
 class TestLoRAServing:
@@ -442,7 +442,7 @@ class TestLoRAServing:
 
     def test_engine_lora_methods(self):
         """Engine has LoRA management methods."""
-        from vllm_i64.engine.i64_engine import I64Engine
+        from tr_hash_i64.engine.i64_engine import I64Engine
         engine = I64Engine(model=None, num_experts=4, vocab_size=100, device="cpu")
 
         # No model → can't enable
@@ -476,7 +476,7 @@ class TestDetailedHealth:
 
     def test_health_has_uptime(self):
         """Server tracks start time for uptime."""
-        from vllm_i64.engine.i64_engine import I64Engine
+        from tr_hash_i64.engine.i64_engine import I64Engine
         engine = I64Engine(model=None, num_experts=4, vocab_size=100, device="cpu")
         server = I64Server(engine=engine)
         assert hasattr(server, '_start_time')
@@ -484,21 +484,21 @@ class TestDetailedHealth:
 
     def test_health_has_usage_tracker(self):
         """Server has usage tracker."""
-        from vllm_i64.engine.i64_engine import I64Engine
+        from tr_hash_i64.engine.i64_engine import I64Engine
         engine = I64Engine(model=None, num_experts=4, vocab_size=100, device="cpu")
         server = I64Server(engine=engine)
         assert isinstance(server._usage_tracker, UsageTracker)
 
     def test_health_has_request_cache(self):
         """Server has request cache."""
-        from vllm_i64.engine.i64_engine import I64Engine
+        from tr_hash_i64.engine.i64_engine import I64Engine
         engine = I64Engine(model=None, num_experts=4, vocab_size=100, device="cpu")
         server = I64Server(engine=engine)
         assert isinstance(server._request_cache, RequestCache)
 
     def test_server_routes_include_new_endpoints(self):
         """create_app registers all new endpoints."""
-        from vllm_i64.engine.i64_engine import I64Engine
+        from tr_hash_i64.engine.i64_engine import I64Engine
         engine = I64Engine(model=None, num_experts=4, vocab_size=100, device="cpu")
         server = I64Server(engine=engine)
         app = server.create_app()
@@ -520,7 +520,7 @@ class TestServerIntegration:
     """Integration tests for server with all new features enabled."""
 
     def _make_server(self, **kwargs):
-        from vllm_i64.engine.i64_engine import I64Engine
+        from tr_hash_i64.engine.i64_engine import I64Engine
         engine = I64Engine(model=None, num_experts=4, vocab_size=100, device="cpu")
         return I64Server(engine=engine, **kwargs)
 

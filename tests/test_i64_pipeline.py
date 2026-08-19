@@ -1,5 +1,5 @@
 """
-vllm-i64 :: Tests
+tr-hash-i64 :: Tests
 
 Verifies that the entire pipeline is integer-first:
   - Routing produces integer expert IDs
@@ -13,16 +13,16 @@ INL - 2025
 import torch
 import numpy as np
 import pytest
-from vllm_i64.kernels.i64_ops import (
+from tr_hash_i64.kernels.i64_ops import (
     i64_route_tokens,
     i64_scatter,
     i64_gather,
     i64_expert_forward,
     i64_full_pipeline,
 )
-from vllm_i64.engine.i64_scheduler import I64Scheduler, I64Request
-from vllm_i64.engine.i64_engine import I64Engine, sampling_requires_token_history
-from vllm_i64.core.sampling import SamplingParams
+from tr_hash_i64.engine.i64_scheduler import I64Scheduler, I64Request
+from tr_hash_i64.engine.i64_engine import I64Engine, sampling_requires_token_history
+from tr_hash_i64.core.sampling import SamplingParams
 
 
 # =============================================================================

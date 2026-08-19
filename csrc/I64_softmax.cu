@@ -1,5 +1,5 @@
 /**
- * vllm-i64 :: I64_softmax.cu
+ * tr-hash-i64 :: I64_softmax.cu
  *
  * CUDA kernel: integer softmax using Q7 LUT.
  *

@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0", "wheel", "torch>=2.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "vllm-i64"
+name = "tr-hash-i64"
 version = "0.3.0"
 description = "Integer-first inference engine for token-routed language models"
 readme = "README.md"
@@ -50,14 +50,14 @@ lora = [
 ]
 
 [project.scripts]
-vllm-i64 = "vllm_i64.cli:main"
+tr-hash-i64 = "tr_hash_i64.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/Complexity-ML/vllm-i64"
-Repository = "https://github.com/Complexity-ML/vllm-i64"
+Homepage = "https://github.com/Complexity-ML/tr-hash-i64"
+Repository = "https://github.com/Complexity-ML/tr-hash-i64"
 
 [tool.setuptools.packages.find]
-include = ["vllm_i64*"]
+include = ["tr_hash_i64*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

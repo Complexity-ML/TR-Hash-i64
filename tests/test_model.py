@@ -1,5 +1,5 @@
 """
-vllm-i64 :: Test Model Forward Pass
+tr-hash-i64 :: Test Model Forward Pass
 
 Tests ComplexityDeepModel end-to-end on CPU:
   - Correct output shapes
@@ -20,8 +20,8 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from vllm_i64.models.complexity_deep.config import ComplexityDeepConfig
-from vllm_i64.models.complexity_deep.model import (
+from tr_hash_i64.models.complexity_deep.config import ComplexityDeepConfig
+from tr_hash_i64.models.complexity_deep.model import (
     ComplexityDeepModel,
     ComplexityDecoderLayer,
     Attention,

@@ -1,5 +1,5 @@
 """
-vllm-i64 :: Async Engine Tests
+tr-hash-i64 :: Async Engine Tests
 
 Tests for AsyncI64Engine lifecycle, generation, streaming,
 concurrency, stats, and graceful shutdown.
@@ -22,8 +22,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from vllm_i64.engine.i64_engine import I64Engine, AsyncI64Engine, GenerationResult
-from vllm_i64.core.sampling import SamplingParams
+from tr_hash_i64.engine.i64_engine import I64Engine, AsyncI64Engine, GenerationResult
+from tr_hash_i64.core.sampling import SamplingParams
 
 
 @pytest.mark.asyncio
@@ -145,7 +145,7 @@ async def test_active_requests_counter():
 
 async def main():
     print("=" * 60)
-    print("vllm-i64 :: Async Engine Tests")
+    print("tr-hash-i64 :: Async Engine Tests")
     print("=" * 60)
 
     tests = [

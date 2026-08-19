@@ -1,8 +1,8 @@
-# vllm-i64 :: Docker image
+# tr-hash-i64 :: Docker image
 # Integer-first inference for token-routed models
 #
-# Build:  docker build -t vllm-i64 .
-# Run:    docker run --gpus all -p 8000:8000 vllm-i64 serve tr-moe-306
+# Build:  docker build -t tr-hash-i64 .
+# Run:    docker run --gpus all -p 8000:8000 tr-hash-i64 serve tr-moe-306
 
 FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS builder
 
@@ -25,7 +25,7 @@ RUN mkdir -p build && cd build && \
     cmake .. -GNinja -DCMAKE_BUILD_TYPE=Release && \
     ninja
 
-# Install vllm-i64
+# Install tr-hash-i64
 RUN pip install -e ".[dev]"
 
 # =========================================================================
@@ -50,5 +50,5 @@ COPY --from=builder /build /app
 ENV PYTHONPATH=/app
 EXPOSE 8000
 
-ENTRYPOINT ["python3", "-m", "vllm_i64.cli"]
+ENTRYPOINT ["python3", "-m", "tr_hash_i64.cli"]
 CMD ["serve", "tr-moe-306", "--port", "8000", "--quantization", "none"]

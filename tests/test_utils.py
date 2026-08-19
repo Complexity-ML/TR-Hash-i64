@@ -1,5 +1,5 @@
 """
-vllm-i64 :: Test Utilities
+tr-hash-i64 :: Test Utilities
 
 Tests for:
   - Sampling (greedy, top-k, top-p, temperature, repetition penalty)
@@ -20,14 +20,14 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from vllm_i64.core.sampling import SamplingParams, sample_token, sample_batch
-from vllm_i64.core.quantization import (
+from tr_hash_i64.core.sampling import SamplingParams, sample_token, sample_batch
+from tr_hash_i64.core.quantization import (
     QuantConfig, quantize_int8, dequantize_int8,
     quantize_int4, dequantize_int4, quantize_experts,
 )
-from vllm_i64.core.chat_template import ChatTemplate, find_chat_template
-from vllm_i64.layers.rmsnorm import RMSNorm
-from vllm_i64.layers.rotary import RotaryEmbedding, apply_rotary
+from tr_hash_i64.core.chat_template import ChatTemplate, find_chat_template
+from tr_hash_i64.layers.rmsnorm import RMSNorm
+from tr_hash_i64.layers.rotary import RotaryEmbedding, apply_rotary
 
 
 # =========================================================================

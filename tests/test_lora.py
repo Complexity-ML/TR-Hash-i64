@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from vllm_i64.layers.lora import LoRALinear, LoRAManager
+from tr_hash_i64.layers.lora import LoRALinear, LoRAManager
 
 
 # =========================================================================

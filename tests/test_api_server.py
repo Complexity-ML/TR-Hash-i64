@@ -1,5 +1,5 @@
 """
-vllm-i64 :: Test API Server
+tr-hash-i64 :: Test API Server
 
 Comprehensive tests for aiohttp endpoints:
   - POST /v1/completions (sync + streaming + validation)
@@ -29,11 +29,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from vllm_i64.engine.i64_engine import I64Engine
-from vllm_i64.api.server import I64Server, CompletionRequest, CompletionResponse
-from vllm_i64.api._completions import CompletionsMixin
-from vllm_i64.api.middleware import TokenBucketRateLimiter
-from vllm_i64.api.tracking import UsageTracker, RequestCache, LatencyTracker, PriorityManager
+from tr_hash_i64.engine.i64_engine import I64Engine
+from tr_hash_i64.api.server import I64Server, CompletionRequest, CompletionResponse
+from tr_hash_i64.api._completions import CompletionsMixin
+from tr_hash_i64.api.middleware import TokenBucketRateLimiter
+from tr_hash_i64.api.tracking import UsageTracker, RequestCache, LatencyTracker, PriorityManager
 
 
 @pytest.fixture
@@ -150,8 +150,8 @@ async def test_models_reports_prepacked_parameter_count(client, server):
     import torch.nn as nn
 
     model = nn.Linear(3, 2)
-    model._vllm_i64_parameter_count = 306_486_528
-    model._vllm_i64_quantization = "int8"
+    model._tr_hash_i64_parameter_count = 306_486_528
+    model._tr_hash_i64_quantization = "int8"
     server.sync_engine.model = model
 
     resp = await client.get("/v1/models")

@@ -1,5 +1,5 @@
 """
-vllm-i64 :: Test Features V3
+tr-hash-i64 :: Test Features V3
 
 Tests for the third batch of features:
   - Seed parameter (reproducible generation)
@@ -27,7 +27,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from vllm_i64.core.sampling import (
+from tr_hash_i64.core.sampling import (
     SamplingParams, sample_batch, sample_batch_with_logprobs,
     apply_logit_bias, apply_frequency_presence_penalty_batch,
 )
@@ -206,7 +206,7 @@ class TestFrequencyPresencePenalty:
 # 4. CompletionRequest validation for new fields
 # =====================================================================
 
-from vllm_i64.api.server import CompletionRequest
+from tr_hash_i64.api.server import CompletionRequest
 
 
 class TestCompletionRequestValidation:
@@ -263,7 +263,7 @@ class TestCompletionRequestValidation:
 # 5. Latency Tracker
 # =====================================================================
 
-from vllm_i64.api.server import LatencyTracker
+from tr_hash_i64.api.server import LatencyTracker
 
 
 class TestLatencyTracker:
@@ -322,7 +322,7 @@ class TestLatencyTracker:
 # 6. Request Logger
 # =====================================================================
 
-from vllm_i64.api.server import RequestLogger
+from tr_hash_i64.api.server import RequestLogger
 
 
 class TestRequestLogger:
@@ -380,7 +380,7 @@ class TestRequestLogger:
 # 7. Priority Manager
 # =====================================================================
 
-from vllm_i64.api.server import PriorityManager
+from tr_hash_i64.api.server import PriorityManager
 
 
 class TestPriorityManager:
@@ -422,14 +422,14 @@ class TestPriorityManager:
 # 8. Server Integration — new routes
 # =====================================================================
 
-from vllm_i64.api.server import I64Server
+from tr_hash_i64.api.server import I64Server
 
 
 class TestServerV3Integration:
     """Integration tests for V3 server features."""
 
     def _make_server(self, **kwargs):
-        from vllm_i64.engine.i64_engine import I64Engine
+        from tr_hash_i64.engine.i64_engine import I64Engine
         engine = I64Engine(model=None, num_experts=4, vocab_size=100, device="cpu")
         return I64Server(engine=engine, **kwargs)
 
@@ -479,7 +479,7 @@ class TestModelInfo:
 
     def test_model_info_no_model(self):
         """Model info works even without a loaded model."""
-        from vllm_i64.engine.i64_engine import I64Engine
+        from tr_hash_i64.engine.i64_engine import I64Engine
         engine = I64Engine(model=None, num_experts=4, vocab_size=100, device="cpu")
         server = I64Server(engine=engine, model_name="test-model")
         # Server should have model_name
@@ -510,7 +510,7 @@ class TestModelInfo:
                 return torch.randn(1, 100)
 
         model = MockModel()
-        from vllm_i64.engine.i64_engine import I64Engine
+        from tr_hash_i64.engine.i64_engine import I64Engine
         engine = I64Engine(model=model, num_experts=4, vocab_size=100, device="cpu")
 
         # Verify engine has model with config

@@ -1,5 +1,5 @@
 """
-vllm-i64 :: Integration Tests
+tr-hash-i64 :: Integration Tests
 
 End-to-end tests for engine + KV cache + scheduler interactions:
   - Full generate() with KV cache read/write
@@ -21,10 +21,10 @@ from collections import deque
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from vllm_i64.engine.i64_engine import I64Engine, GenerationResult, AdaptiveBatchSizer
-from vllm_i64.engine.i64_scheduler import I64Scheduler, I64Request, I64Batch
-from vllm_i64.core.kv_cache import PagedKVCache
-from vllm_i64.core.sampling import SamplingParams
+from tr_hash_i64.engine.i64_engine import I64Engine, GenerationResult, AdaptiveBatchSizer
+from tr_hash_i64.engine.i64_scheduler import I64Scheduler, I64Request, I64Batch
+from tr_hash_i64.core.kv_cache import PagedKVCache
+from tr_hash_i64.core.sampling import SamplingParams
 
 
 # =====================================================================
@@ -286,7 +286,7 @@ class TestGenerateIntegration:
 class TestAsyncEngineFactory:
     def test_from_sync_engine(self):
         """AsyncI64Engine.from_sync_engine should create a valid instance."""
-        from vllm_i64.engine.i64_engine import AsyncI64Engine
+        from tr_hash_i64.engine.i64_engine import AsyncI64Engine
         engine = I64Engine(model=None, num_experts=4, vocab_size=100, device="cpu")
         async_engine = AsyncI64Engine.from_sync_engine(engine)
         assert async_engine.engine is engine
@@ -296,7 +296,7 @@ class TestAsyncEngineFactory:
 
     def test_from_sync_engine_stats(self):
         """Stats should work on factory-created instance."""
-        from vllm_i64.engine.i64_engine import AsyncI64Engine
+        from tr_hash_i64.engine.i64_engine import AsyncI64Engine
         engine = I64Engine(model=None, num_experts=4, vocab_size=100, device="cpu")
         async_engine = AsyncI64Engine.from_sync_engine(engine)
         stats = async_engine.get_stats()

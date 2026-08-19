@@ -1,5 +1,5 @@
 """
-vllm-i64 :: Engine Benchmark
+tr-hash-i64 :: Engine Benchmark
 
 Comprehensive benchmarking tool measuring:
   - TTFT  (Time to First Token) — ms
@@ -45,8 +45,8 @@ def bench_sync(
     vocab_size: int = 32000,
 ) -> BenchResult:
     """Benchmark sync engine: TTFT, ITL, throughput."""
-    from vllm_i64.engine.i64_engine import I64Engine
-    from vllm_i64.core.sampling import SamplingParams
+    from tr_hash_i64.engine.i64_engine import I64Engine
+    from tr_hash_i64.core.sampling import SamplingParams
 
     max_seq = prompt_len + output_len + 32
     engine = I64Engine(
@@ -131,8 +131,8 @@ async def bench_async(
     vocab_size: int = 32000,
 ) -> BenchResult:
     """Benchmark async engine: concurrent requests, batching throughput."""
-    from vllm_i64.engine.i64_engine import AsyncI64Engine
-    from vllm_i64.core.sampling import SamplingParams
+    from tr_hash_i64.engine.i64_engine import AsyncI64Engine
+    from tr_hash_i64.core.sampling import SamplingParams
 
     max_seq = prompt_len + output_len + 32
     engine = AsyncI64Engine(
@@ -205,7 +205,7 @@ def bench_kv_cache(
 ) -> dict:
     """Benchmark KV cache allocation, write, read, free cycles."""
     import torch
-    from vllm_i64.core.kv_cache import PagedKVCache
+    from tr_hash_i64.core.kv_cache import PagedKVCache
 
     num_blocks = max(256, (num_seqs * seq_len) // block_size + 64)
     cache = PagedKVCache(
@@ -286,7 +286,7 @@ def run_full_benchmark(
 ):
     """Run all benchmarks and display results."""
     print("=" * 70)
-    print("  vllm-i64 :: Engine Benchmark")
+    print("  tr-hash-i64 :: Engine Benchmark")
     print("=" * 70)
 
     results = []

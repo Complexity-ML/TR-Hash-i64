@@ -1,12 +1,12 @@
 """
-vllm-i64 :: Scheduler Tests
+tr-hash-i64 :: Scheduler Tests
 INL - 2025
 """
 import pytest
 import numpy as np
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from vllm_i64.engine.i64_scheduler import I64Scheduler, I64Request, I64Batch, RequestStatus
+from tr_hash_i64.engine.i64_scheduler import I64Scheduler, I64Request, I64Batch, RequestStatus
 
 
 # ---------------------------------------------------------------------------

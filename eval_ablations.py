@@ -83,7 +83,7 @@ def start_server(model: str, port: int, dtype: str, no_cuda_graphs: bool) -> sub
     else:
         ckpt = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", model))
     cmd = [
-        sys.executable, "-m", "vllm_i64.cli",
+        sys.executable, "-m", "tr_hash_i64.cli",
         "serve", model,
         "--checkpoint", ckpt,
         "--port", str(port),
