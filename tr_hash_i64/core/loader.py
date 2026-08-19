@@ -191,92 +191,61 @@ def _load_state_dict(checkpoint_path: str) -> Dict[str, torch.Tensor]:
 
 def _convert_framework_weights(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
     """
-    Convert complexity-framework checkpoint format to tr-hash-i64 format.
-
-    The public 306.5M exports are already native and pass through unchanged.
-    Only the older ``mlp.experts.N`` layout still requires conversion.
+    Convert a complexity-framework TR-Hash checkpoint (``mlp.engine.*``
+    naming, deterministic single/multi-hash routing) to tr-hash-i64's
+    native parameter names. Already-native checkpoints pass through
+    unchanged.
     """
     import re
 
-    # Dense-306 intentionally keeps regular gate/up/down projections. Treating
-    # it as an expert of size one changes both names and execution semantics.
-    has_separate_experts = any("mlp.experts." in k and "gate_proj" in k for k in state_dict)
-
-    if not has_separate_experts:
+    has_engine_format = any(".mlp.engine." in k for k in state_dict)
+    if not has_engine_format:
         return state_dict  # Already in tr-hash-i64 format or unknown
 
-    logger.info("Detected complexity-framework format, converting weights...")
+    logger.info("Detected complexity-framework mlp.engine format, converting weights...")
     converted = {}
 
-    # Collect expert weights per layer
-    expert_weights = {}  # (layer_idx, expert_id) → {gate_proj, up_proj, down_proj}
-
     for name, tensor in state_dict.items():
-        # Expert format: layers.X.mlp.experts.E.{gate,up,down}_proj.weight
-        m = re.match(r"(layers\.\d+)\.mlp\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)\.weight", name)
-        if m:
-            layer_prefix, expert_id, proj_type = m.group(1), int(m.group(2)), m.group(3)
-            key = (layer_prefix, expert_id)
-            if key not in expert_weights:
-                expert_weights[key] = {}
-            expert_weights[key][proj_type] = tensor
+        # Cache-only artifacts recomputed at export/build time
+        # (complexity/tr_hash/routing.py) -- never loaded.
+        if name.endswith(("fused_route_codes", "fused_expert_pairs")):
             continue
 
-        # token_to_expert buffer
-        if "token_to_expert" in name:
-            converted[name] = tensor
+        m = re.match(r"(layers\.\d+\.mlp)\.engine\.expert_gate$", name)
+        if m:
+            converted[f"{m.group(1)}.gate_proj_w"] = tensor
+            continue
+        m = re.match(r"(layers\.\d+\.mlp)\.engine\.expert_up$", name)
+        if m:
+            converted[f"{m.group(1)}.up_proj_w"] = tensor
+            continue
+        m = re.match(r"(layers\.\d+\.mlp)\.engine\.expert_down$", name)
+        if m:
+            converted[f"{m.group(1)}.down_proj_w"] = tensor
             continue
 
-        # INL dynamics: controller.0 → controller_in, controller.2 → controller_out
-        m = re.match(r"(layers\.\d+\.dynamics)\.controller\.0\.(weight|bias)", name)
+        m = re.match(r"(layers\.\d+\.mlp)\.engine\.route_table$", name)
         if m:
-            converted[f"{m.group(1)}.controller_in.{m.group(2)}"] = tensor
-            continue
-        m = re.match(r"(layers\.\d+\.dynamics)\.controller\.2\.(weight|bias)", name)
-        if m:
-            converted[f"{m.group(1)}.controller_out.{m.group(2)}"] = tensor
+            # [top_k, vocab] -- the exact table baked at training time by
+            # the multi-hash rendezvous construction (route_hash_count
+            # hash channels summed per (token, expert) pair, top_k highest
+            # scores kept; see complexity/tr_hash/routing.py::_multi_hash_routes).
+            # Load verbatim: recomputing routes here would silently diverge
+            # from the trained model.
+            prefix = m.group(1)
+            converted[f"{prefix}.topk_token_to_expert"] = tensor.long()
+            converted[f"{prefix}.token_to_expert"] = tensor[0].long()
             continue
 
-        # Everything else passes through as-is
+        m = re.match(r"(layers\.\d+\.mlp)\.engine\.(shared_gate|shared_up|shared_down)\.weight$", name)
+        if m:
+            converted[f"{m.group(1)}.{m.group(2)}.weight"] = tensor
+            continue
+
+        # Everything else (attention, norms, embeddings, rotary) passes
+        # through as-is.
         converted[name] = tensor
 
-    # Fuse expert gate+up into gate_up_proj [num_experts, hidden, 2*inter]
-    # and stack down_proj [num_experts, inter, hidden]
-    from collections import defaultdict
-    layers_experts = defaultdict(dict)
-    for (layer_prefix, expert_id), weights in expert_weights.items():
-        layers_experts[layer_prefix][expert_id] = weights
-
-    for layer_prefix, experts in layers_experts.items():
-        num_experts = max(experts.keys()) + 1
-
-        gate_up_list = []
-        down_list = []
-        for eid in range(num_experts):
-            w = experts[eid]
-            gate = w["gate_proj"]  # [inter, hidden]
-            up = w["up_proj"]      # [inter, hidden]
-            down = w["down_proj"]  # [hidden, inter]
-
-            # Fuse gate+up: [hidden, 2*inter] (transposed for bmm format)
-            gate_up = torch.cat([gate, up], dim=0).t()  # [hidden, 2*inter]
-            gate_up_list.append(gate_up)
-            down_list.append(down.t())  # [inter, hidden]
-
-        # Stack: [num_experts, hidden, 2*inter]
-        gate_up_stacked = torch.stack(gate_up_list, dim=0)
-        down_stacked = torch.stack(down_list, dim=0)
-
-        converted[f"{layer_prefix}.mlp.gate_up_proj"] = gate_up_stacked
-        converted[f"{layer_prefix}.mlp.down_proj"] = down_stacked
-
-        # Create token_to_expert buffer if not present
-        tok_expert_key = f"{layer_prefix}.mlp.token_to_expert"
-        if tok_expert_key not in converted:
-            vocab_size = state_dict.get("embed_tokens.weight", torch.zeros(32000, 1)).shape[0]
-            converted[tok_expert_key] = torch.arange(vocab_size, dtype=torch.long) % num_experts
-
-    logger.info("Converted %d layers (%d expert groups)", len(layers_experts), len(expert_weights))
     return converted
 
 

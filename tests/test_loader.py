@@ -245,6 +245,54 @@ class TestLoadCheckpoint:
         finally:
             os.unlink(path)
 
+    def test_converts_mlp_engine_checkpoint_format(self):
+        """complexity-framework's TRHashEngine checkpoint layout
+        (layers.N.mlp.engine.*) must convert to tr-hash-i64's native
+        gate_proj_w/up_proj_w/down_proj_w/topk_token_to_expert names, not
+        pass through unrecognized (which would leave expert weights and
+        the route table at their random init -- silently wrong inference)."""
+        model, config = self._make_small_model()
+        expert_inter = config.intermediate_size // config.num_experts
+
+        route_table = torch.stack(
+            [
+                torch.arange(config.vocab_size) % config.num_experts,
+                (torch.arange(config.vocab_size) * 7 + 1) % config.num_experts,
+            ]
+        )
+        expert_gate = torch.randn(config.num_experts, config.hidden_size, expert_inter)
+        expert_up = torch.randn(config.num_experts, config.hidden_size, expert_inter)
+        expert_down = torch.randn(config.num_experts, expert_inter, config.hidden_size)
+
+        state_dict = {
+            "layers.0.mlp.engine.expert_gate": expert_gate,
+            "layers.0.mlp.engine.expert_up": expert_up,
+            "layers.0.mlp.engine.expert_down": expert_down,
+            "layers.0.mlp.engine.route_table": route_table,
+            # Cache-only artifacts -- must be dropped, not loaded anywhere.
+            "layers.0.mlp.engine.fused_route_codes": torch.zeros(config.vocab_size, dtype=torch.uint8),
+            "layers.0.mlp.engine.fused_expert_pairs": torch.zeros(6, 2, dtype=torch.int32),
+        }
+
+        with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
+            torch.save(state_dict, f.name)
+            path = f.name
+
+        try:
+            stats = load_checkpoint(model, path, dtype=torch.float32)
+            mlp = model.layers[0].mlp
+            assert torch.equal(mlp.gate_proj_w.data, expert_gate)
+            assert torch.equal(mlp.up_proj_w.data, expert_up)
+            assert torch.equal(mlp.down_proj_w.data, expert_down)
+            assert torch.equal(mlp.topk_token_to_expert, route_table)
+            assert torch.equal(mlp.token_to_expert, route_table[0])
+            assert not any(
+                name.endswith(("fused_route_codes", "fused_expert_pairs"))
+                for name in stats.get("missing", set())
+            )
+        finally:
+            os.unlink(path)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
