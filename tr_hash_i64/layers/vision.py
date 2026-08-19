@@ -9,8 +9,6 @@ Supports:
   - SiglipVisionModel (Google SigLIP family)
   - Linear or MLP projector to match LLM hidden_size
   - Image preprocessing (resize, normalize)
-
-INL - 2025
 """
 
 import logging

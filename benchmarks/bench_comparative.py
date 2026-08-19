@@ -12,8 +12,6 @@ Metrics:
   - Inter-Token Latency (ITL) — ms
   - Throughput — tokens/second
   - Memory usage — GB
-
-INL - 2025
 """
 
 import time

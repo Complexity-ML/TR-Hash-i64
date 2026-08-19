@@ -7,8 +7,6 @@ Supports OpenAI-compatible tool_calls format.
 Extraction strategies:
   1. JSON object with "name" and "arguments" fields
   2. <tool_call> XML-style tags (common in fine-tuned models)
-
-INL - 2025
 """
 
 import json

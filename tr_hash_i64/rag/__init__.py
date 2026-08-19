@@ -3,8 +3,6 @@ tr-hash-i64 :: RAG (Retrieval-Augmented Generation)
 
 Native RAG pipeline integrated into the inference server.
 Chunking, embedding, FAISS indexing, and context retrieval.
-
-INL - 2025
 """
 
 from .retriever import Retriever

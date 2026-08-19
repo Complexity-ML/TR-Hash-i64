@@ -10,8 +10,6 @@ dot products via tl.dot, then rescales once at the end.
     y[m,n] = (sum_k x_int8[m,k] * w_int8[n,k]) * x_scale[m] * w_scale[n]
 
 Works on all GPUs with Triton support (SM70+), no cuBLAS dependency.
-
-INL - 2025
 """
 
 import torch

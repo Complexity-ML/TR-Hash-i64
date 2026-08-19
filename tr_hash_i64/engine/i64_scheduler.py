@@ -17,8 +17,6 @@ Features:
   - Fairness (round-robin within same priority)
 
 Zero float in the scheduler. FP16 exists only in model forward pass.
-
-INL - 2025
 """
 
 import heapq

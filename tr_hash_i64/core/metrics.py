@@ -12,8 +12,6 @@ Metrics:
   - tr_hash_i64_batch_size: current batch size gauge
   - tr_hash_i64_kv_cache_usage: KV cache block usage ratio
   - tr_hash_i64_experts_load: tokens per expert (load balance)
-
-INL - 2025
 """
 
 import time

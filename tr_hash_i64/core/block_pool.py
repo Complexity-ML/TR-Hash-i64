@@ -10,7 +10,6 @@ Provides:
   - BlockPool         : allocate/free/prefix-cache blocks
 
 Stripped of all vLLM-specific dependencies (vllm.distributed, Request, etc.)
-INL - 2025
 """
 
 from __future__ import annotations

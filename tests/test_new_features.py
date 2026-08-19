@@ -12,8 +12,6 @@ Tests for all features added in the latest update:
 
 Run:
     python -m pytest tests/test_new_features.py -v
-
-INL - 2025
 """
 
 import pytest

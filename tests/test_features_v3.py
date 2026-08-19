@@ -14,8 +14,6 @@ Tests for the third batch of features:
 
 Run:
     python -m pytest tests/test_features_v3.py -v
-
-INL - 2025
 """
 
 import pytest

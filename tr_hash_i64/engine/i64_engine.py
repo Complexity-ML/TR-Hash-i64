@@ -20,8 +20,6 @@ Integrations:
 
 Integer-first: the engine loop is 100% integer control flow.
 Float only exists inside model.forward().
-
-INL - 2025
 """
 
 import torch
@@ -183,14 +181,16 @@ class I64Engine:
         # _graph_velocity_buf: static [max_batch, hidden_size] buffer for CUDA graph (Bug 4 fix)
         self._graph_velocity_buf: Optional[torch.Tensor] = None
 
-        # === CUDA Graph Runner ===
-        # CUDA-only: MPS has no capture/replay API. decode_step's tensor-only
-        # dispatch is forced unconditionally on MPS instead (see
-        # naive_paged_decode_attention / TokenRoutedMLP.expert_forward), which
-        # gets most of the same win without needing a graph at all.
+        # === Graph Runner (CUDAGraphRunner on cuda, MPSGraphRunner on mps) ===
+        # Same public interface either way (capture_common_sizes/run/
+        # is_captured), so the decode-batch path below doesn't need to know
+        # which one it's holding.
         self.cuda_graph_runner = None
-        if device == "cuda" and self.model is not None:
-            self._init_cuda_graph(max_batch_size)
+        if self.model is not None:
+            if device == "cuda":
+                self._init_cuda_graph(max_batch_size)
+            elif device == "mps":
+                self._init_mps_graph(max_batch_size)
 
         # === Speculative Decoding ===
         self.speculative_decoder = None
@@ -324,11 +324,66 @@ class I64Engine:
             logger.warning("CUDA graph init failed: %s — falling back to eager mode", e)
             self.cuda_graph_runner = None
 
+    def _init_mps_graph(self, max_batch_size: int):
+        """Initialize MPS graph runner (TorchScript trace/freeze) for decode steps."""
+        try:
+            from tr_hash_i64.core.mps_graph import MPSGraphRunner
+
+            # torch.jit.freeze refuses to constant-fold parameters that still
+            # require grad -- .eval() alone doesn't clear that flag, and an
+            # inference engine never needs gradients on the model anyway.
+            if self.model is not None:
+                self.model.requires_grad_(False)
+
+            if self.kv_cache is not None:
+                self.kv_cache.init_graph_buffers(max_batch_size)
+
+            self._graph_seq_ids = torch.arange(
+                max_batch_size, dtype=torch.long, device=self.device
+            )
+
+            if self.model is not None and hasattr(self.model, 'config'):
+                hidden_size = self.model.config.hidden_size
+                dtype = next(self.model.parameters()).dtype
+                self._graph_velocity_buf = torch.zeros(
+                    max_batch_size, hidden_size, dtype=dtype, device=self.device
+                )
+
+            has_decode_step = hasattr(self.model, 'decode_step')
+
+            def _graph_forward(token_ids, positions, _expert_ids):
+                if has_decode_step and self.kv_cache is not None:
+                    bs = token_ids.shape[0]
+                    return self.model.decode_step(
+                        token_ids=token_ids,
+                        positions=positions,
+                        kv_cache=self.kv_cache,
+                        seq_ids_tensor=self._graph_seq_ids[:bs],
+                        velocity_buf=self._graph_velocity_buf[:bs] if self._graph_velocity_buf is not None else None,
+                    )
+                else:
+                    return self.model(
+                        token_ids=token_ids,
+                        positions=positions,
+                        kv_cache=self.kv_cache,
+                        seq_ids=list(range(token_ids.shape[0])),
+                        tokens_per_seq=[1] * token_ids.shape[0],
+                    )
+
+            self.cuda_graph_runner = MPSGraphRunner(
+                forward_fn=_graph_forward,
+                max_batch_size=max_batch_size,
+                device=self.device,
+            )
+        except Exception as e:
+            logger.warning("MPS graph init failed: %s — falling back to eager mode", e)
+            self.cuda_graph_runner = None
+
     def warmup_and_capture_graphs(self):
-        """Warmup model and capture CUDA graphs for common decode batch sizes."""
+        """Warmup model and capture graphs for common decode batch sizes."""
         if self.cuda_graph_runner is None or self.model is None:
             return
-        if self.device != "cuda":
+        if self.device not in ("cuda", "mps"):
             return
         try:
             if self.kv_cache is not None:
@@ -341,18 +396,23 @@ class I64Engine:
                 self.kv_cache._graph_mode = False
                 # Capture warmup wrote garbage to block 0 — mark dirty
                 self.kv_cache._dirty_blocks.add(0)
-            logger.info("CUDA graphs captured for sizes: %s", sorted(self.cuda_graph_runner._captured_sizes))
+            logger.info("%s graphs captured for sizes: %s",
+                        self.device.upper(), sorted(self.cuda_graph_runner._captured_sizes))
         except Exception as e:
-            logger.warning("CUDA graph capture failed: %s", e)
+            logger.warning("%s graph capture failed: %s", self.device.upper(), e)
             # Free all partially-captured graphs and release private pool memory
             if self.cuda_graph_runner is not None:
                 self.cuda_graph_runner.graphs.clear()
                 self.cuda_graph_runner.static_inputs.clear()
-                self.cuda_graph_runner.static_outputs.clear()
+                if hasattr(self.cuda_graph_runner, "static_outputs"):
+                    self.cuda_graph_runner.static_outputs.clear()
             self.cuda_graph_runner = None
             if self.kv_cache is not None:
                 self.kv_cache._graph_mode = False
-            torch.cuda.empty_cache()
+            if self.device == "cuda":
+                torch.cuda.empty_cache()
+            else:
+                torch.mps.empty_cache()
 
     def enable_metrics(self, port: int = 9090, model_name: str = ""):
         """Enable Prometheus metrics collection."""

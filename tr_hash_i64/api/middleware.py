@@ -2,8 +2,6 @@
 tr-hash-i64 :: API Middleware
 
 CORS, authentication, rate limiting, and load shedding middleware.
-
-INL - 2025
 """
 
 import asyncio

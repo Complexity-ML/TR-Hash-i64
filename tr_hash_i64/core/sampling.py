@@ -10,8 +10,6 @@ Strategies:
   - top-k filtering
   - top-p (nucleus) filtering
   - repetition penalty
-
-INL - 2025
 """
 
 import numpy as np

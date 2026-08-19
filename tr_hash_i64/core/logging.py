@@ -4,8 +4,6 @@ tr-hash-i64 :: Structured Logging
 Production-grade structured logging with JSON output.
 Replaces print() throughout the codebase with proper log levels,
 request tracing, and machine-parseable output.
-
-INL - 2025
 """
 
 import logging

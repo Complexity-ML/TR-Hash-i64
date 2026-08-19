@@ -5,8 +5,6 @@ Pure PyTorch implementation for when CUDA kernels aren't compiled.
 Mirrors the C/CUDA kernels in csrc/ exactly.
 
 All routing/scheduling is integer. FP16 only in expert compute.
-
-INL - 2025
 """
 
 import torch

@@ -13,8 +13,6 @@ Integer softmax (I64):
     5. Normalize: w_i = exp_i / sum(exp)
 
 Eliminates float exp() entirely — replaced by table lookup.
-
-INL - 2025
 """
 
 import torch

@@ -9,8 +9,6 @@ Three entry points:
   - triton_expert_forward_int8(): INT8 inline dequant (loads int8+scale, no FP materialization)
 
 Fallback: if Triton not available, returns None and caller uses PyTorch.
-
-INL - 2025
 """
 
 import torch

@@ -9,8 +9,6 @@ Forward: y = down_proj(silu(gate_proj(x)) * up_proj(x))
 
 No sort, no dispatch, no scatter-gather. Straight GEMM.
 TP: gate_proj/up_proj are ColumnParallel, down_proj is RowParallel.
-
-INL - 2025
 """
 
 import torch

@@ -12,8 +12,6 @@ Usage:
         out = ops.rmsnorm_forward(x, weight, eps)
         x_int8, scale = ops.quantize_int8(x)
         y = ops.gemm_dequant_int8(x, w_int8, w_scale)
-
-INL - 2025
 """
 
 import os

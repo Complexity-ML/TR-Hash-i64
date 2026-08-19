@@ -14,8 +14,6 @@ Usage:
     sandbox = Sandbox(timeout=30, max_memory_mb=256)
     result = sandbox.execute("print(2 + 2)", language="python")
     # result.stdout == "4\n", result.exit_code == 0
-
-INL - 2025
 """
 
 from .executor import Sandbox, ExecutionResult

@@ -8,8 +8,6 @@ Integer path (enabled by weight_q12 buffer):
   - Float rsqrt (1 scalar per token — irreducible, no integer analog)
   - INT32 weight multiply: normalized_q7 × weight_q12 → out_q19
   - Saves the float weight multiply on the final step
-
-INL - 2025
 """
 
 import torch

@@ -8,8 +8,6 @@ End-to-end tests for engine + KV cache + scheduler interactions:
   - Request counter race safety
   - Deque-based slot pool
   - Single-pass timeout handling
-
-INL - 2025
 """
 
 import pytest

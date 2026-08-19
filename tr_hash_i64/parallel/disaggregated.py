@@ -20,8 +20,6 @@ Key design:
   - Decode GPU: low latency for token-by-token generation (memory-bound)
   - KV transfer uses torch.distributed (NCCL preferred, TCP fallback)
   - PagedKVCache format is shared — block-level serialization
-
-INL - 2025
 """
 
 import os

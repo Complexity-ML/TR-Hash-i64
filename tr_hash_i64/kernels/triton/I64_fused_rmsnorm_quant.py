@@ -13,8 +13,6 @@ Fused path (1 kernel, 1 read + 1 write):
 
 Saves ~2x memory bandwidth. Critical for decode phase where
 the pipeline is memory-bound (small batch, large hidden dim).
-
-INL - 2025
 """
 
 import torch

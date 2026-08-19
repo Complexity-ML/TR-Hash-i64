@@ -9,8 +9,6 @@ Constrained decoding for structured output:
 
 Each processor takes logits and returns modified logits (mask invalid tokens).
 Integer-first: only the logits tensor is float, all state tracking is integer.
-
-INL - 2025
 """
 
 import torch

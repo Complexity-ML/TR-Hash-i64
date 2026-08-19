@@ -13,8 +13,6 @@ Usage:
     ops = get_ops()
     expert_ids = ops.route_tokens(token_ids, num_experts)
     intermediate = ops.silu_hadamard(gate_up, expert_inter)
-
-INL - 2025
 """
 
 import os

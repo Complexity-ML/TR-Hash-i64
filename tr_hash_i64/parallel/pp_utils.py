@@ -5,8 +5,6 @@ Model-level utilities for PP:
   - PPMissingLayer: placeholder for layers not on this rank
   - IntermediateTensors: dict wrapper for inter-stage communication
   - make_layers: creates ModuleList with PP-aware layer placement
-
-INL - 2025
 """
 
 import torch

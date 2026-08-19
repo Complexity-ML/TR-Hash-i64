@@ -6,8 +6,6 @@ Verifies that the entire pipeline is integer-first:
   - Scatter/gather preserve token order via integer indices
   - Engine control flow is integer
   - Only expert MLP compute is float
-
-INL - 2025
 """
 
 import torch

@@ -14,8 +14,6 @@ Security hardening:
 
 Integer-first: no bloat, no Docker, no VMs.
 Just fork → limit → exec → collect → kill.
-
-INL - 2025
 """
 
 import ast

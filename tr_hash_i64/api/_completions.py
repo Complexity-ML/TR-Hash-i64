@@ -2,7 +2,6 @@
 tr-hash-i64 :: Completions Mixin
 
 /v1/completions and /v1/chat/completions handlers + async streaming.
-INL - 2025
 """
 
 import asyncio

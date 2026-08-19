@@ -2,7 +2,6 @@
 tr-hash-i64 :: Server Helpers Mixin
 
 Tokenize/detokenize, chat template, image processing, response building.
-INL - 2025
 """
 
 import asyncio

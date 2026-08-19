@@ -32,8 +32,6 @@ Endpoints:
     POST /v1/execute              → sandboxed code execution
     GET  /v1/agent/events         → SSE agent event stream
     GET  /v1/agent/history        → recent agent events
-
-INL - 2025
 """
 
 import asyncio

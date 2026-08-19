@@ -12,8 +12,6 @@ Handles:
   - Attention O (RowParallel) — TP sharded on input dim
   - token_to_expert buffer (replicated)
   - dtype conversion
-
-INL - 2025
 """
 
 import json as _json

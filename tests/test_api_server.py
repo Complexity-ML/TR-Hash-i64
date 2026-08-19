@@ -13,8 +13,6 @@ Comprehensive tests for aiohttp endpoints:
   - Concurrent requests
 
 Uses aiohttp test_utils for in-process testing.
-
-INL - 2025
 """
 
 import pytest

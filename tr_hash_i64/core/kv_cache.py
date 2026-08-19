@@ -9,8 +9,6 @@ Architecture (mirroring vLLM v1):
   block_table → seq_id × block_idx → physical_block_id  (this file)
 
 Same public API as before; swap-to-CPU and CUDA graph support preserved.
-
-INL - 2025
 """
 
 import heapq

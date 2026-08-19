@@ -9,8 +9,6 @@ Modes:
   - agent.chat("message")     — single-turn chat
   - agent.interactive()       — REPL with tool use
   - await agent.arun("task")  — async version of run()
-
-INL - 2025
 """
 
 import asyncio

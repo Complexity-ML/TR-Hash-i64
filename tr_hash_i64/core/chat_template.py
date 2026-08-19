@@ -3,8 +3,6 @@ tr-hash-i64 :: Chat Template
 
 Apply chat templates to messages for conversational models.
 Loads Jinja2 templates from checkpoint directories.
-
-INL - 2025
 """
 
 import json

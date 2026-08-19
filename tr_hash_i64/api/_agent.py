@@ -2,7 +2,6 @@
 tr-hash-i64 :: Agent Handlers Mixin
 
 /v1/execute (sandbox), /v1/agent/events, /v1/agent/history
-INL - 2025
 """
 
 import asyncio

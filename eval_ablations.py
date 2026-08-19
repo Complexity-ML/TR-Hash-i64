@@ -8,8 +8,6 @@ Usage:
 
 Each model is started, queried with every prompt, then shut down before
 the next model loads.  Results are written to ablation_results.json.
-
-INL - 2025
 """
 
 import argparse

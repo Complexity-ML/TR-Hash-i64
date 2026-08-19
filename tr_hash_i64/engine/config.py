@@ -6,8 +6,6 @@ Replaces scattered getattr(config, ...) with a single typed dataclass.
 
 All fields have sensible defaults — construct with EngineConfig()
 for a working configuration, or override specific fields.
-
-INL - 2025
 """
 
 from dataclasses import dataclass, field

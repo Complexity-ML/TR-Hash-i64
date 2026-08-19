@@ -9,8 +9,6 @@ Supports hot-swapping LoRA adapters at runtime:
 
 Integer-first: adapter selection is integer (adapter_id).
 Only the low-rank matrices A, B are float.
-
-INL - 2025
 """
 
 import torch

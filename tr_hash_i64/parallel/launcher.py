@@ -14,8 +14,6 @@ Usage (CLI):
 Usage (Python):
     launch_distributed(tp_size=4, args=["serve", "pacific-prime-chat"])
     launch_distributed(tp_size=2, pp_size=2, args=["serve", "pacific-prime-chat"])
-
-INL - 2025
 """
 
 import logging

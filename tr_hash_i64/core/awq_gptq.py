@@ -22,8 +22,6 @@ Both are converted to our internal format:
   - packed: uint8 (2 values per byte, high nibble first)
   - scales: float per group, shape (out_features, num_groups)
   - zeros:  float per group, shape (out_features, num_groups)
-
-INL - 2025
 """
 
 import json as _json

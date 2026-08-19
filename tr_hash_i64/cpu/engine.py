@@ -18,8 +18,6 @@ All step() calls run in a thread executor so the asyncio event loop is
 never blocked by the CPU-heavy forward pass.
 
 Changes to i64_engine.py (GPU engine) cannot break this file.
-
-INL - 2025
 """
 
 import asyncio

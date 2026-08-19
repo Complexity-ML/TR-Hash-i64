@@ -12,8 +12,6 @@ Integer softmax (fixed-point):
     exp_i32 = lut_exp(shifted)                   # lookup table exp
     weights_i32 = exp_i32 / sum(exp_i32)         # integer division
     Same top-k selection, same expert dispatch.
-
-INL - 2025
 """
 
 import torch

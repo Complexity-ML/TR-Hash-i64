@@ -12,8 +12,6 @@ Usage:
 Backend selection:
     - 'inductor' (default): full optimization with C++ codegen
     - 'aot_eager': AOT autograd without codegen (fallback if no C++ compiler)
-
-INL - 2025
 """
 
 import torch

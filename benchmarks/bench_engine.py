@@ -9,8 +9,6 @@ Comprehensive benchmarking tool measuring:
   - Scheduler overhead
 
 Runs sync and async modes, multiple prompt lengths and batch sizes.
-
-INL - 2025
 """
 
 import time

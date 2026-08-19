@@ -11,8 +11,6 @@ Usage:
 Multi-GPU:
     tr-hash-i64 serve pacific-prime-chat --tp 4
     → launches 4 workers via torchrun, continuous batching on each
-
-INL - 2025
 """
 
 import argparse

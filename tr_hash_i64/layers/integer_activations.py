@@ -9,8 +9,6 @@ Canonical location for all integer activations:
   - silu_integer, silu_multiply_integer
   - sigmoid_integer
   - softplus_integer
-
-INL - 2025
 """
 
 import torch

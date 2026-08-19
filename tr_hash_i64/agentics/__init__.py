@@ -19,8 +19,6 @@ Usage:
     orch.submit("task 1")
     orch.submit("task 2")
     results = orch.run_sync()
-
-INL - 2025
 """
 
 from .agent import Agent

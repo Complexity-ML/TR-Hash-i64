@@ -7,8 +7,6 @@ Tests TP primitives with tp_size=1 (no distributed required):
   - shard_expert_weights correctness
   - all_reduce passthrough (tp=1)
   - Model init with TP layers
-
-INL - 2025
 """
 
 import torch

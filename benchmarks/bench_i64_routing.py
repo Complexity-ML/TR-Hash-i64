@@ -5,8 +5,6 @@ Compare i64 routing vs float-based MoE routing.
 
 i64 routing: token_id & mask → 1 integer op per token
 Float MoE:   hidden @ W_gate → softmax → topk → ~3 matmuls + softmax per token
-
-INL - 2025
 """
 
 import torch

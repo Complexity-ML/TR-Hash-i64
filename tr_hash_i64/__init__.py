@@ -8,8 +8,6 @@ The philosophy: integers everywhere, float only where math requires it.
   KV cache:    i32 (block indices)
   Sampling:    i64 (argmax → token ID)
   Compute:     fp16 (expert MLP, attention — the ONLY float)
-
-INL - 2025
 """
 
 __version__ = "0.3.0"

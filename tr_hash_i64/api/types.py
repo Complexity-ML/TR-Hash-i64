@@ -2,7 +2,6 @@
 tr-hash-i64 :: API Types
 
 CompletionRequest and CompletionResponse dataclasses.
-INL - 2025
 """
 
 import hashlib

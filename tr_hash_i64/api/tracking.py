@@ -2,8 +2,6 @@
 tr-hash-i64 :: API Tracking Utilities
 
 Usage tracking, latency tracking, request logging, priority management, and request caching.
-
-INL - 2025
 """
 
 import time

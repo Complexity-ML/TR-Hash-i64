@@ -3,8 +3,6 @@ tr-hash-i64 :: Tokenizer
 
 Load tokenizer from checkpoint directory.
 Wraps HuggingFace tokenizers for i64 ↔ text conversion.
-
-INL - 2025
 """
 
 import logging

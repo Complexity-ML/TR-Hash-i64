@@ -7,8 +7,6 @@ Initializes distributed (TP + PP), loads the model shard, and serves.
 Only rank 0 runs the API server.
 Other ranks participate in TP compute via all_reduce
 and PP via send/recv.
-
-INL - 2025
 """
 
 import logging

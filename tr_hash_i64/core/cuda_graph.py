@@ -10,8 +10,6 @@ Token-routed models are ideal for CUDA graphs:
 
 Multi-batch: captures graphs for common batch sizes (1, 2, 4, 8, ...)
 and selects the smallest captured graph >= actual batch size.
-
-INL - 2025
 """
 
 import torch

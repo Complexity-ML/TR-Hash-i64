@@ -1,6 +1,5 @@
 """
 tr-hash-i64 :: Sampling Tests
-INL - 2025
 """
 import pytest
 import torch

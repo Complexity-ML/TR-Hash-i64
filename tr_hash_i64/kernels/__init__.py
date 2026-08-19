@@ -12,6 +12,4 @@ Three acceleration tiers (auto-selected, highest available wins):
 
   3. PyTorch fallback — works everywhere (CPU, old GPU, no compiler)
      Standard torch ops, no compilation needed
-
-INL - 2025
 """

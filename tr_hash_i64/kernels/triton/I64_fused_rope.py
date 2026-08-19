@@ -15,8 +15,6 @@ Fused path (1 kernel):
 
 Eliminates intermediate tensors and multiple kernel launches.
 Works for both float cos/sin and Q14 integer cos/sin.
-
-INL - 2025
 """
 
 import torch

@@ -12,8 +12,6 @@ Since routing is a deterministic hash / multi-hash table lookup baked
 into the checkpoint (not a learned gate), dispatch is pure integer
 indexing — this module just takes already-routed expert_ids and does
 the batched compute, agnostic to how those ids were derived.
-
-INL - 2025
 """
 
 import torch

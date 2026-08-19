@@ -1,6 +1,5 @@
 """
 tr-hash-i64 :: Scheduler Tests
-INL - 2025
 """
 import pytest
 import numpy as np

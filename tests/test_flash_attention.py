@@ -9,8 +9,6 @@ Tests for FlashAttention integration and naive fallback:
 
 Run:
     python -m pytest tests/test_flash_attention.py -v
-
-INL - 2025
 """
 
 import pytest

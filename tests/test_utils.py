@@ -7,8 +7,6 @@ Tests for:
   - Chat template rendering
   - RMSNorm
   - Rotary embeddings
-
-INL - 2025
 """
 
 import json

@@ -10,8 +10,6 @@ Run:
 
 Note: project uses pytest-asyncio; asyncio_mode = "auto" can be set
 in pyproject.toml [tool.pytest.ini_options] if desired.
-
-INL - 2025
 """
 
 import pytest

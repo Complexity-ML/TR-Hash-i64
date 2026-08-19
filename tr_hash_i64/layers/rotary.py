@@ -8,8 +8,6 @@ Integer RoPE:
   - Pre-compute cos/sin for all positions as Q14 INT16 ([-1,1] → [-16384,16384])
   - apply_rotary_integer: Q7 input × Q14 cos/sin → Q21, dequant to float
   - Eliminates float trig at inference time (tables computed once)
-
-INL - 2025
 """
 
 import torch

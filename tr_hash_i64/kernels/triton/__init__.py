@@ -7,8 +7,6 @@ Fused operations that eliminate intermediate memory round-trips:
   - I64_fused_softmax:       Integer softmax (Q7 LUT-based)
   - I64_fused_rope:          Rotary embedding (fused cos/sin apply)
   - I64_fused_dequant_gemm:  INT8 dequant + GEMM fused
-
-INL - 2025
 """
 
 from tr_hash_i64.kernels.triton.I64_fused_rmsnorm_quant import (

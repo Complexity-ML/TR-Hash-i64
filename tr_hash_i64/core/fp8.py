@@ -15,8 +15,6 @@ Three entry points:
   - quantize_fp8():      offline weight quantization
 
 Auto-fallback: INT8 path on SM80 (A100), FP16 on older GPUs.
-
-INL - 2025
 """
 
 import torch

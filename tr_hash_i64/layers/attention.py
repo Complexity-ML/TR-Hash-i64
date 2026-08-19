@@ -7,8 +7,6 @@ Abstraction over attention implementations:
 
 Integer-first: all indexing (cu_seqlens, cache_seqlens, block_table) is integer.
 Only the Q/K/V/output tensors are float.
-
-INL - 2025
 """
 
 import torch

@@ -12,8 +12,6 @@ Fused path (1 kernel):
 
 Saves writing + reading the full FP16 weight tensor.
 For a 4096×11008 projection: saves 86MB of memory bandwidth.
-
-INL - 2025
 """
 
 import torch

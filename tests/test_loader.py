@@ -8,8 +8,6 @@ Tests:
   - TP-aware loading (ColumnParallel/RowParallel detection)
   - Tied embedding handling
   - Registry lookup
-
-INL - 2025
 """
 
 import torch

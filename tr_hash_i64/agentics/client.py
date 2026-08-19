@@ -3,8 +3,6 @@ tr-hash-i64 :: Agentics — LLM Client
 
 OpenAI-compatible HTTP client for tr-hash-i64 server.
 Supports sync + async, streaming, and native tool_calls.
-
-INL - 2025
 """
 
 import json

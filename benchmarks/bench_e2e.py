@@ -6,8 +6,6 @@ Measures real inference throughput:
   - Token generation (decode) tok/s
   - Total latency per request
   - Batch throughput
-
-INL - 2025
 """
 
 import torch

@@ -11,8 +11,6 @@ Supports:
 
 Security: tools are sandboxed by default (read-only).
 Pass allow_shell=True to enable shell execution.
-
-INL - 2025
 """
 
 import os

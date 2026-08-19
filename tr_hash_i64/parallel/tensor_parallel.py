@@ -11,8 +11,6 @@ Usage:
     init_distributed(tp_size=4)
     model = ComplexityDeepModel(config)
     shard_model(model)
-
-INL - 2025
 """
 
 import logging

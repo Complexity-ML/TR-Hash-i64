@@ -6,8 +6,6 @@ concerns (per-request params, logprobs, logit processors).
 
 The engine delegates all sampling to this class instead of inlining
 the logic in the step loop.
-
-INL - 2025
 """
 
 import numpy as np

@@ -4,7 +4,6 @@ tr-hash-i64 :: Admin Handlers Mixin
 Health, models, tokenize, embeddings, usage, lora, batch,
 model-info, metrics, logs, priority, cancel, WebSocket, OpenAPI,
 cache stats/purge, monitor, expert stats.
-INL - 2025
 """
 
 import asyncio

@@ -10,8 +10,6 @@ Usage:
     init_pp(pp_size=2)
     pp = get_pp()
     start, end = get_pp_indices(num_layers, pp.pp_rank, pp.pp_size)
-
-INL - 2025
 """
 
 import logging

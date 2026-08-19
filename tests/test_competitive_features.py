@@ -13,8 +13,6 @@ Tests for all new competitive features:
 
 Run:
     python -m pytest tests/test_competitive_features.py -v
-
-INL - 2025
 """
 
 import pytest

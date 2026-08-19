@@ -10,8 +10,6 @@ Verifies multi-format checkpoint loading:
 
 Run:
     python -m pytest tests/test_safetensors_loader.py -v
-
-INL - 2025
 """
 
 import pytest

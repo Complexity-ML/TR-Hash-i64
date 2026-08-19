@@ -2,7 +2,6 @@
 tr-hash-i64 :: RAG Handlers Mixin
 
 /v1/rag/index, /v1/rag/search, /v1/rag/stats
-INL - 2025
 """
 
 import json

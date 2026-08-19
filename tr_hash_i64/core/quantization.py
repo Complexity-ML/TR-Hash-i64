@@ -14,8 +14,6 @@ Native INT8 matmul:
   Activations dynamically quantized per-token, weights statically per-channel.
   Works on CPU (VNNI/AMX) and GPU (SM80+ tensor cores).
   Fallback to dequant+F.linear on unsupported platforms.
-
-INL - 2025
 """
 
 import torch

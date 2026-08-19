@@ -6,8 +6,6 @@ Tests for tr-hash-i64 performance features:
   - Prefix caching integration (WI-4)
   - Speculative decoding integration (WI-5)
   - CUDA graph activation (WI-6)
-
-INL - 2025
 """
 
 import pytest

@@ -12,8 +12,6 @@ Tests for the second batch of features:
 
 Run:
     python -m pytest tests/test_features_v2.py -v
-
-INL - 2025
 """
 
 import pytest

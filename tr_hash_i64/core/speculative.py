@@ -15,8 +15,6 @@ Strategy:
      (respects user's SamplingParams — temperature, top-k, top-p, etc.)
 
 Tensor-only: no .item() calls in the draft loop for GPU efficiency.
-
-INL - 2025
 """
 
 import random

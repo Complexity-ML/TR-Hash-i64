@@ -25,8 +25,6 @@ Usage:
 
     # Or use the sync interface:
     results = orch.run_sync()
-
-INL - 2025
 """
 
 import asyncio

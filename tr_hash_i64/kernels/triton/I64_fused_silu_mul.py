@@ -13,8 +13,6 @@ Fused path (1 kernel):
 
 Eliminates 2 intermediate tensors (each size N × inter).
 For Llama-7B decode (inter=11008): saves ~44KB per token per layer.
-
-INL - 2025
 """
 
 import torch
