@@ -37,7 +37,13 @@ def resolve_checkpoint_source(source: str) -> str:
 
     local = Path(source).expanduser()
     if local.exists():
-        return str(local.resolve())
+        # .absolute(), not .resolve() -- resolve() dereferences symlinks all
+        # the way through, and the HF cache stores files under extension-less
+        # content-hash blobs with the real filename only on the symlink
+        # (snapshots/<rev>/model.safetensors -> blobs/<hash>). Following it
+        # strips the .safetensors suffix that _load_state_dict's file-type
+        # detection depends on.
+        return str(local.absolute())
     if source.count("/") != 1:
         raise FileNotFoundError(f"Checkpoint not found: {source}")
 
