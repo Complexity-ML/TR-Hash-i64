@@ -197,3 +197,77 @@ class TestComplexityDeepModel:
             logits1 = moe_model(ids)
             logits2 = moe_model(ids)
         assert torch.allclose(logits1, logits2)
+
+
+# ── decode_step (CUDA-graph-safe decode path) ──
+
+class TestDecodeStep:
+    """
+    decode_step() is the graph-capturable counterpart to forward()'s
+    _cached_attention: tensor-only KV writes/reads instead of the
+    per-token .item() loop that breaks CUDA graph stream capture.
+    It must produce the same numbers as forward() for the token it decodes.
+    """
+
+    def _make_kv_cache(self, config):
+        from tr_hash_i64.core.kv_cache import PagedKVCache
+        return PagedKVCache(
+            num_layers=config.num_hidden_layers,
+            num_kv_heads=config.num_key_value_heads,
+            head_dim=config.head_dim,
+            block_size=16,
+            num_blocks=8,
+            max_seqs=4,
+            dtype=torch.float32,
+            device="cpu",
+        )
+
+    def test_matches_cached_forward(self, moe_config, moe_model):
+        prefill_ids = torch.tensor([3, 9, 12])
+        next_id = torch.tensor([7])
+
+        # Reference: forward()'s existing _cached_attention path end to end.
+        kv_ref = self._make_kv_cache(moe_config)
+        with torch.no_grad():
+            moe_model(
+                prefill_ids, positions=torch.arange(3),
+                kv_cache=kv_ref, seq_ids=[0], tokens_per_seq=[3],
+            )
+            logits_ref = moe_model(
+                next_id, positions=torch.tensor([3]),
+                kv_cache=kv_ref, seq_ids=[0], tokens_per_seq=[1],
+            )
+
+        # Same prefill, then decode_step() for the new token.
+        kv_new = self._make_kv_cache(moe_config)
+        with torch.no_grad():
+            moe_model(
+                prefill_ids, positions=torch.arange(3),
+                kv_cache=kv_new, seq_ids=[0], tokens_per_seq=[3],
+            )
+            logits_new = moe_model.decode_step(
+                token_ids=next_id,
+                positions=torch.tensor([3]),
+                kv_cache=kv_new,
+                seq_ids_tensor=torch.tensor([0]),
+            )
+
+        assert torch.allclose(logits_ref, logits_new, atol=1e-5, rtol=1e-4)
+
+    def test_accepts_unused_velocity_buf(self, moe_config, moe_model):
+        """Engine always passes velocity_buf; model has no mu-guidance state
+        to put there, so decode_step must accept and ignore it."""
+        kv = self._make_kv_cache(moe_config)
+        with torch.no_grad():
+            moe_model(
+                torch.tensor([1, 2]), positions=torch.arange(2),
+                kv_cache=kv, seq_ids=[0], tokens_per_seq=[2],
+            )
+            logits = moe_model.decode_step(
+                token_ids=torch.tensor([5]),
+                positions=torch.tensor([2]),
+                kv_cache=kv,
+                seq_ids_tensor=torch.tensor([0]),
+                velocity_buf=torch.zeros(1, moe_config.hidden_size),
+            )
+        assert logits.shape == (1, moe_config.vocab_size)

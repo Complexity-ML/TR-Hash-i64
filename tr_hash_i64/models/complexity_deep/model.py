@@ -17,6 +17,7 @@ from tr_hash_i64.layers.token_routed_mlp import TokenRoutedMLP
 from tr_hash_i64.layers.attention import (
     is_flash_attn_available, flash_prefill_attention,
     naive_varlen_attention, naive_cached_attention,
+    naive_paged_decode_attention,
 )
 
 
@@ -198,6 +199,47 @@ class Attention(nn.Module):
         out = out.to(q.dtype).reshape(bsz, self.num_heads * self.head_dim)
         return self.o_proj(out)
 
+    def decode_step(self, hidden, positions, kv_cache, layer_idx, seq_ids_tensor):
+        """
+        Single-token-per-sequence decode, CUDA-graph safe: KV cache writes
+        and reads are tensor-only (write_kv_decode / get_*_tensor), unlike
+        _cached_attention's per-token .item() loop which breaks stream capture.
+        """
+        bsz = hidden.shape[0]
+
+        if hasattr(self, "qkv_proj"):
+            q, k, v = self.qkv_proj(hidden).split(self.qkv_splits, dim=-1)
+        else:
+            q = self.q_proj(hidden)
+            k = self.k_proj(hidden)
+            v = self.v_proj(hidden)
+
+        q = q.view(bsz, self.num_heads, self.head_dim)
+        k = k.view(bsz, self.num_kv_heads, self.head_dim)
+        v = v.view(bsz, self.num_kv_heads, self.head_dim)
+
+        if self.use_qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+
+        cos, sin = self.rope(positions)
+        q = apply_rotary(q, cos, sin)
+        k = apply_rotary(k, cos, sin)
+
+        kv_cache.write_kv_decode(layer_idx, seq_ids_tensor, positions, k, v)
+
+        block_table = kv_cache.get_block_table_for_seqs_tensor(seq_ids_tensor)
+        cache_seqlens = kv_cache.get_cache_seqlens_tensor(seq_ids_tensor)
+        k_cache, v_cache = kv_cache.get_cache_tensors(layer_idx)
+
+        scale = 1.0 / math.sqrt(self.head_dim)
+        out = naive_paged_decode_attention(
+            q, k_cache, v_cache, block_table, cache_seqlens,
+            self.num_kv_groups, softmax_scale=scale,
+        )
+        out = out.to(q.dtype).reshape(bsz, self.num_heads * self.head_dim)
+        return self.o_proj(out)
+
 
 # =========================================================================
 # Dense SwiGLU MLP
@@ -296,6 +338,21 @@ class ComplexityDecoderLayer(nn.Module):
 
         return hidden
 
+    def decode_step(self, hidden, positions, token_ids, kv_cache, layer_idx, seq_ids_tensor):
+        """Graph-safe counterpart to forward() for single-token decode."""
+        residual = hidden
+        hidden = self.input_layernorm(hidden)
+        hidden = self.self_attn.decode_step(
+            hidden, positions, kv_cache, layer_idx, seq_ids_tensor)
+        hidden = residual + hidden
+
+        residual = hidden
+        hidden = self.post_attention_layernorm(hidden)
+        hidden = self.mlp(hidden, token_ids=token_ids)
+        hidden = residual + hidden
+
+        return hidden
+
 
 # =========================================================================
 # Complexity Deep Model
@@ -346,6 +403,33 @@ class ComplexityDeepModel(nn.Module):
                 seq_ids=seq_ids,
                 tokens_per_seq=tokens_per_seq,
             )
+
+        hidden = self.norm(hidden)
+
+        if self.tie_word_embeddings:
+            logits = F.linear(hidden.float(), self.embed_tokens.weight.float())
+        else:
+            logits = self.lm_head(hidden)
+
+        return logits
+
+    def decode_step(self, token_ids, positions, kv_cache, seq_ids_tensor, velocity_buf=None):
+        """
+        Graph-safe single-token-per-sequence decode step.
+
+        Tensor-only KV cache writes (no .item()/Python loops), so this path
+        is safe to capture into a CUDA graph — unlike forward()'s
+        _cached_attention, which writes the KV cache one token at a time via
+        .item() and forces a CPU/GPU sync during stream capture.
+
+        velocity_buf is accepted (unused) to match the engine's call
+        signature — there is no mu-guidance velocity state in this model.
+        """
+        hidden = self.embed_tokens(token_ids.long())
+
+        for i, layer in enumerate(self.layers):
+            hidden = layer.decode_step(
+                hidden, positions, token_ids, kv_cache, i, seq_ids_tensor)
 
         hidden = self.norm(hidden)
 

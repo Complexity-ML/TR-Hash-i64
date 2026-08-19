@@ -11,7 +11,10 @@ class TokenRoutedMLP(nn.Module):
     Generic token-routed MLP with TP support and Shared Lexical Expert.
 
     Routing (i64, replicated on all ranks):
-        expert_id = token_to_expert[token_id]  (Zipf-balanced or modulo)
+        expert_id = topk_token_to_expert[route_idx, token_id]
+        Each route_idx is an independent hash channel computed at training
+        time (multi-hash rendezvous routing) and loaded verbatim from the
+        checkpoint — never recomputed at inference.
 
     Expert compute (float, sharded across TP ranks):
         gate_up: (E, hidden, 2 * inter_per_tp) — ColumnParallel
@@ -131,6 +134,9 @@ class TokenRoutedMLP(nn.Module):
 
     def expert_forward(self, x: torch.Tensor, expert_ids: torch.Tensor) -> torch.Tensor:
         """Sparse dispatch with loop — matches framework supplementary code."""
+        if x.is_cuda and torch.cuda.is_current_stream_capturing():
+            return self._dense_expert_forward(x, expert_ids)
+
         output = torch.zeros_like(x)
         for e in range(self.num_experts):
             mask = (expert_ids == e)
@@ -149,6 +155,34 @@ class TokenRoutedMLP(nn.Module):
                 up_e = x_e @ self.up_proj_w[e]
             inter_e = F.silu(gate_e) * up_e
             output[mask] = (inter_e @ self.down_proj_w[e]).to(output.dtype)
+        return all_reduce(output)
+
+    def _dense_expert_forward(self, x: torch.Tensor, expert_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Graph-safe expert dispatch: every expert computes densely for all
+        tokens, then results are masked-accumulated with a float multiply.
+
+        expert_forward's `x[mask]` / `output[mask] = ...` gather-scatter has
+        a token count that depends on routing values, so its output shape
+        isn't fixed across replays — incompatible with CUDA graph capture.
+        This path avoids that by never changing tensor shapes, at the cost
+        of computing every expert for every token (fine for decode's small
+        per-step batches and small num_experts).
+        """
+        output = torch.zeros_like(x)
+        for e in range(self.num_experts):
+            if hasattr(self, "expert_gate_up"):
+                gate_e, up_e = self.expert_gate_up[e](x).chunk(2, dim=-1)
+                out_e = self.expert_down[e](F.silu(gate_e) * up_e)
+            elif hasattr(self, "gate_up_proj_w"):
+                gate_e, up_e = (x @ self.gate_up_proj_w[e]).chunk(2, dim=-1)
+                out_e = (F.silu(gate_e) * up_e) @ self.down_proj_w[e]
+            else:
+                gate_e = x @ self.gate_proj_w[e]
+                up_e = x @ self.up_proj_w[e]
+                out_e = (F.silu(gate_e) * up_e) @ self.down_proj_w[e]
+            mask = (expert_ids == e).unsqueeze(-1).to(output.dtype)
+            output = output + out_e.to(output.dtype) * mask
         return all_reduce(output)
 
     def forward(self, x, token_ids=None, **kwargs):
