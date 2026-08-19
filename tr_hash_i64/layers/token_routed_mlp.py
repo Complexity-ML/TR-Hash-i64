@@ -134,7 +134,7 @@ class TokenRoutedMLP(nn.Module):
 
     def expert_forward(self, x: torch.Tensor, expert_ids: torch.Tensor) -> torch.Tensor:
         """Sparse dispatch with loop — matches framework supplementary code."""
-        if x.is_cuda and torch.cuda.is_current_stream_capturing():
+        if (x.is_cuda and torch.cuda.is_current_stream_capturing()) or x.device.type == "mps":
             return self._dense_expert_forward(x, expert_ids)
 
         output = torch.zeros_like(x)

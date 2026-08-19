@@ -18,6 +18,7 @@ INL - 2025
 
 import json as _json
 import logging
+import re
 import torch
 import torch.nn as nn
 from typing import Optional, Dict
@@ -40,29 +41,74 @@ def resolve_checkpoint_source(source: str) -> str:
     if source.count("/") != 1:
         raise FileNotFoundError(f"Checkpoint not found: {source}")
 
-    from huggingface_hub import snapshot_download
+    from huggingface_hub import HfApi, snapshot_download
 
     logger.info("Downloading Hugging Face model: %s", source)
-    return snapshot_download(
+
+    repo_files = HfApi().list_repo_files(source)
+    if "model.safetensors" in repo_files:
+        return snapshot_download(
+            repo_id=source,
+            allow_patterns=[
+                "*.json",
+                "*.safetensors",
+                "*.jinja",
+                "*.j2",
+            ],
+        )
+
+    # Multi-checkpoint "replay" repo: token_pack_NNN_TOKENS/model.safetensors
+    # per training step, nothing at the root. Pull only the highest step
+    # number (the most-trained checkpoint) and skip the optimizer shards
+    # (checkpoint.pt, optimizer_rank*.pt) — not needed for inference and
+    # would otherwise multiply the download several times over per checkpoint.
+    pack_re = re.compile(r"^(token_pack_(\d+)_\d+)/model\.safetensors$")
+    packs = [
+        (int(match.group(2)), match.group(1))
+        for f in repo_files
+        for match in [pack_re.match(f)]
+        if match
+    ]
+    if not packs:
+        raise FileNotFoundError(
+            f"No model.safetensors found in {source} "
+            "(checked repo root and token_pack_*/ subfolders)"
+        )
+    _, latest_pack = max(packs)
+    logger.info("Multi-checkpoint repo — using latest: %s", latest_pack)
+
+    # Exact root-level filenames only — "*.json" would also glob-match every
+    # token_pack_*/training_state.json (one per training step, not needed).
+    root_files = [
+        f for f in repo_files
+        if "/" not in f and f.endswith((".json", ".jinja", ".j2"))
+    ]
+    local_dir = Path(snapshot_download(
         repo_id=source,
-        allow_patterns=[
-            "*.json",
-            "*.safetensors",
-            "*.jinja",
-            "*.j2",
-        ],
-    )
+        allow_patterns=root_files + [f"{latest_pack}/model.safetensors"],
+    ))
+    weights_link = local_dir / "model.safetensors"
+    if not weights_link.exists():
+        weights_link.symlink_to(local_dir / latest_pack / "model.safetensors")
+    return str(local_dir)
 
 
 def _quantize_cpu_dynamic(model: nn.Module) -> nn.Module:
-    """Pack ``nn.Linear`` weights as INT8 using the Linux x86 CPU backend."""
+    """Pack ``nn.Linear`` weights as INT8 using the platform's native CPU backend.
+
+    x86/FBGEMM on x86_64, QNNPACK on ARM (Apple Silicon, mobile) — PyTorch
+    ships each as native SIMD kernels for that instruction set only, so
+    there's no single backend that covers both.
+    """
 
     engines = torch.backends.quantized.supported_engines
-    engine = "x86" if "x86" in engines else "fbgemm" if "fbgemm" in engines else None
+    engine = next(
+        (e for e in ("x86", "fbgemm", "qnnpack") if e in engines), None
+    )
     if engine is None:
         raise RuntimeError(
-            "CPU INT8 requires the x86 or FBGEMM PyTorch quantization backend; "
-            f"available backends: {engines}"
+            "CPU INT8 requires the x86, FBGEMM, or QNNPACK PyTorch "
+            f"quantization backend; available backends: {engines}"
         )
 
     torch.backends.quantized.engine = engine

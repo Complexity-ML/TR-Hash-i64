@@ -146,7 +146,7 @@ class I64Engine:
         self.expert_mask = np.int64(num_experts - 1)
 
         # Persistent input buffers (avoid per-step allocation)
-        _buf_device = device if device == "cpu" or torch.cuda.is_available() else "cpu"
+        _buf_device = device if device in ("cpu", "mps") or torch.cuda.is_available() else "cpu"
         _max_tokens = max_batch_size * max_seq_len
         self._buf_token_ids = torch.zeros(_max_tokens, dtype=torch.long, device=_buf_device)
         self._buf_positions = torch.zeros(_max_tokens, dtype=torch.long, device=_buf_device)
@@ -184,8 +184,12 @@ class I64Engine:
         self._graph_velocity_buf: Optional[torch.Tensor] = None
 
         # === CUDA Graph Runner ===
+        # CUDA-only: MPS has no capture/replay API. decode_step's tensor-only
+        # dispatch is forced unconditionally on MPS instead (see
+        # naive_paged_decode_attention / TokenRoutedMLP.expert_forward), which
+        # gets most of the same win without needing a graph at all.
         self.cuda_graph_runner = None
-        if device != "cpu" and self.model is not None:
+        if device == "cuda" and self.model is not None:
             self._init_cuda_graph(max_batch_size)
 
         # === Speculative Decoding ===
@@ -324,7 +328,7 @@ class I64Engine:
         """Warmup model and capture CUDA graphs for common decode batch sizes."""
         if self.cuda_graph_runner is None or self.model is None:
             return
-        if self.device == "cpu":
+        if self.device != "cuda":
             return
         try:
             if self.kv_cache is not None:

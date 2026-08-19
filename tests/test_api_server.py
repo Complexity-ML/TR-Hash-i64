@@ -170,7 +170,12 @@ async def test_expert_stats_report_real_top2_routes(client, server):
     class RoutedLayer(nn.Module):
         def __init__(self):
             super().__init__()
-            self.register_buffer("token_to_expert", torch.tensor([0, 1, 2, 3]))
+            # topk_token_to_expert: [top_k, vocab] — one independent hash
+            # channel per route, not derived from token_to_expert by formula.
+            self.register_buffer(
+                "topk_token_to_expert",
+                torch.tensor([[0, 1, 2, 3], [1, 2, 3, 0]]),
+            )
             self.top_k = 2
 
     model = nn.Module()

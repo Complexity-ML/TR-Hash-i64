@@ -118,6 +118,7 @@ class TestPublicRegistry:
 
         assert [item["name"] for item in list_models()] == [
             "tr-hash-moe-500m",
+            "tr-hash-moe-200m",
             "tr-moe-306",
             "dense-306",
         ]

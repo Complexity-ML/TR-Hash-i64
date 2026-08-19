@@ -494,6 +494,25 @@ def _tensor_paged_decode_attention(
     k_all = k_cache[bt].view(batch, max_seq_len, num_kv_heads, head_dim).to(q.dtype)
     v_all = v_cache[bt].view(batch, max_seq_len, num_kv_heads, head_dim).to(q.dtype)
 
+    pos = torch.arange(max_seq_len, device=q.device)          # (max_seq_len,)
+
+    if q.device.type == "mps":
+        # PyTorch's fused SDPA kernel (MPS's flash-attention equivalent) beats
+        # the hand-written matmul/mask/softmax/matmul sequence below by ~2-8x
+        # on this backend, and natively handles GQA repeat — measured, not
+        # assumed (see bench_mps_sdpa_attention.py). CUDA keeps the manual
+        # path below unchanged; it's already validated end-to-end under real
+        # graph capture and SDPA's CUDA-graph-capture behavior isn't re-verified here.
+        k_t = k_all.permute(0, 2, 1, 3)                        # (batch, num_kv_heads, max_seq_len, head_dim)
+        v_t = v_all.permute(0, 2, 1, 3)
+        q_exp = q.unsqueeze(2)                                 # (batch, num_heads, 1, head_dim)
+        keep_mask = (pos.unsqueeze(0) < cache_seqlens.unsqueeze(1))[:, None, None, :]
+        out = F.scaled_dot_product_attention(
+            q_exp, k_t, v_t, attn_mask=keep_mask,
+            scale=softmax_scale, enable_gqa=(num_kv_groups > 1),
+        )
+        return out.squeeze(2)
+
     # GQA: repeat K/V heads to match Q heads
     if num_kv_groups > 1:
         k_all = k_all.repeat_interleave(num_kv_groups, dim=2)
@@ -505,7 +524,6 @@ def _tensor_paged_decode_attention(
     scores = torch.matmul(q_exp, k_t) * softmax_scale
 
     # Mask padding positions (positions >= cache_seqlens) with -inf
-    pos = torch.arange(max_seq_len, device=q.device)          # (max_seq_len,)
     pad_mask = pos.unsqueeze(0) >= cache_seqlens.unsqueeze(1) # (batch, max_seq_len)
     scores = scores.masked_fill(pad_mask[:, None, None, :], float('-inf'))
 
@@ -541,8 +559,12 @@ def naive_paged_decode_attention(
     Returns:
         output: (batch, num_heads, head_dim)
     """
-    # During CUDA graph capture use the fully vectorized path (no .item(), no Python loops).
-    if q.is_cuda and torch.cuda.is_current_stream_capturing():
+    # Use the fully vectorized path (no .item(), no Python loops) during CUDA
+    # graph capture, and unconditionally on MPS — MPS has no graph capture
+    # API, but the per-block .item() loop below is exactly the kind of
+    # data-dependent Python control flow that also breaks TorchScript tracing
+    # and is needlessly slow (dispatch-per-op) under Metal regardless.
+    if (q.is_cuda and torch.cuda.is_current_stream_capturing()) or q.device.type == "mps":
         return _tensor_paged_decode_attention(
             q, k_cache, v_cache, block_table, cache_seqlens, num_kv_groups,
             softmax_scale or 1.0 / math.sqrt(q.shape[-1]),
