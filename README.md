@@ -6,13 +6,29 @@ Python package and CLI command are still named `tr_hash_i64` / `tr-hash-i64`
 internally (see Install/Serve below); only this repository's name has
 changed so far.
 
-- `tr-hash-moe-500m` → [`Pacific-i64/TR-HASH-MOE-500M-HF`](https://huggingface.co/Pacific-i64/TR-HASH-MOE-500M-HF)
-- `tr-moe-306` → [`Pacific-i64/TR-MOE-306`](https://huggingface.co/Pacific-i64/TR-MOE-306)
-- `dense-306` → [`Pacific-i64/Dense-306`](https://huggingface.co/Pacific-i64/Dense-306)
+- `tr-hash-moe-500m` → [`Pacific-i64/TR-HASH-MOE-500M-HF`](https://huggingface.co/Pacific-i64/TR-HASH-MOE-500M-HF) — the only model with a live public endpoint right now.
 
 The 500M runtime loads its layer-specific balanced hash tables exactly, uses
-top-2 0.5/0.5 routing and applies the trained shared/routed output scales. The
-306M pair remains available for matched routed-versus-dense comparisons.
+top-2 0.5/0.5 routing and applies the trained shared/routed output scales.
+
+The earlier 306.5M routed/dense comparison pair (`tr-moe-306` →
+[`Pacific-i64/TR-MOE-306`](https://huggingface.co/Pacific-i64/TR-MOE-306),
+`dense-306` → [`Pacific-i64/Dense-306`](https://huggingface.co/Pacific-i64/Dense-306))
+is no longer served in production, but the checkpoints stay on the Hub and
+both names remain registered — `tr-hash-i64 serve tr-moe-306` /
+`... serve dense-306` still work for local/self-hosted use.
+
+### Routing
+
+Every expert assignment is a lookup into `topk_token_to_expert`, a
+`[top_k, vocab]` table of independent hash channels computed at training
+time (multi-hash rendezvous routing) and loaded verbatim from the checkpoint
+— nothing is recomputed or approximated at inference. On GPU, decode uses a
+CUDA-graph-safe path (`decode_step`): KV cache writes/reads and expert
+dispatch are tensor-only, with no per-token `.item()` calls, so the whole
+decode step can be captured once and replayed with near-zero launch overhead.
+
+
 
 ## Install
 
