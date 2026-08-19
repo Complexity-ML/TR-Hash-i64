@@ -470,15 +470,15 @@ class AdminMixin:
 
         # Every routed layer owns its realized checkpoint lookup. Keeping the
         # tables separate is important because routing is layer-specific.
+        # topk_token_to_expert holds each hash channel's route independently
+        # ([top_k, vocab] — real multi-hash output, not derivable from the
+        # primary channel), so it — not token_to_expert + arithmetic — is
+        # the source of truth for what actually routed each token.
         routed_layers = []
         if engine.model is not None:
             for layer_index, module in enumerate(engine.model.modules()):
-                if hasattr(module, 'token_to_expert'):
-                    routed_layers.append((
-                        layer_index,
-                        module.token_to_expert,
-                        max(1, int(getattr(module, "top_k", 1))),
-                    ))
+                if hasattr(module, 'topk_token_to_expert'):
+                    routed_layers.append((layer_index, module.topk_token_to_expert))
 
         expert_counts = [0] * num_experts
         total_tokens = 0
@@ -491,10 +491,10 @@ class AdminMixin:
                 token_id = int(tid)
                 latest_token_id = token_id
                 if routed_layers:
-                    for _, route_table, top_k in routed_layers:
-                        primary = int(route_table[token_id % len(route_table)].item())
-                        for route_index in range(min(top_k, num_experts)):
-                            expert_id = (primary + route_index) % num_experts
+                    for _, route_table in routed_layers:
+                        vocab = route_table.shape[1]
+                        for route_index in range(route_table.shape[0]):
+                            expert_id = int(route_table[route_index, token_id % vocab].item())
                             expert_counts[expert_id] += 1
                             total_activations += 1
                 else:
@@ -503,11 +503,11 @@ class AdminMixin:
                 total_tokens += 1
 
         if latest_token_id is not None:
-            for layer_number, (_, route_table, top_k) in enumerate(routed_layers):
-                primary = int(route_table[latest_token_id % len(route_table)].item())
+            for layer_number, (_, route_table) in enumerate(routed_layers):
+                vocab = route_table.shape[1]
                 experts = [
-                    (primary + route_index) % num_experts
-                    for route_index in range(min(top_k, num_experts))
+                    int(route_table[route_index, latest_token_id % vocab].item())
+                    for route_index in range(route_table.shape[0])
                 ]
                 latest_routes.append({
                     "layer": layer_number,
@@ -520,7 +520,7 @@ class AdminMixin:
             response = {
                 "num_experts": num_experts,
                 "num_layers": len(routed_layers),
-                "top_k": max((top_k for _, _, top_k in routed_layers), default=1),
+                "top_k": max((rt.shape[0] for _, rt in routed_layers), default=1),
                 "active": True,
                 "total_tokens": total_tokens,
                 "total_activations": total_activations,
@@ -538,7 +538,7 @@ class AdminMixin:
             return web.json_response({
                 "num_experts": num_experts,
                 "num_layers": len(routed_layers),
-                "top_k": max((top_k for _, _, top_k in routed_layers), default=1),
+                "top_k": max((rt.shape[0] for _, rt in routed_layers), default=1),
                 "active": True,
                 "total_tokens": 0,
                 "total_activations": 0,
@@ -554,7 +554,7 @@ class AdminMixin:
         return web.json_response({
             "num_experts": num_experts,
             "num_layers": len(routed_layers),
-            "top_k": max((top_k for _, _, top_k in routed_layers), default=1),
+            "top_k": max((rt.shape[0] for _, rt in routed_layers), default=1),
             "active": False,
             "total_tokens": 0,
             "total_activations": 0,

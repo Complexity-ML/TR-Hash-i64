@@ -8,8 +8,10 @@ Two modes (auto-selected by batch size):
   - BMM mode  (N <= 64): torch.bmm, fully parallel, zero loops, CUDA graph safe
   - Chunked mode (N > 64): sort-by-expert, memory-efficient (prefill only)
 
-Since routing is deterministic (token_id % num_experts), no learned
-gating is needed — dispatch is pure integer indexing.
+Since routing is a deterministic hash / multi-hash table lookup baked
+into the checkpoint (not a learned gate), dispatch is pure integer
+indexing — this module just takes already-routed expert_ids and does
+the batched compute, agnostic to how those ids were derived.
 
 INL - 2025
 """

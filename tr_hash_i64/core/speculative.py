@@ -2,7 +2,8 @@
 tr-hash-i64 :: Speculative Decoding
 
 Token-routed models are ideal for speculative decoding:
-  - Routing is DETERMINISTIC: expert_id = token_id % num_experts
+  - Routing is DETERMINISTIC: expert_id = topk_token_to_expert[:, token_id]
+    (hash / multi-hash lookup baked into the checkpoint, not computed live)
   - No need to speculate on routing — it's known from the draft token
   - Draft model can be a smaller token-routed model (same routing logic)
   - Verification is exact: if draft token is accepted, routing was correct
@@ -35,9 +36,9 @@ class SpeculativeDecoder:
     """
     Speculative decoding for token-routed models.
 
-    Since routing is deterministic (token_id % num_experts),
-    the draft model's routing decisions are always valid
-    if the draft tokens match.
+    Since routing is deterministic (a hash / multi-hash table lookup
+    keyed by token_id, fixed at checkpoint load), the draft model's
+    routing decisions are always valid if the draft tokens match.
     """
 
     def __init__(
