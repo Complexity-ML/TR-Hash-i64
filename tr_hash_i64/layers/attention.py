@@ -558,11 +558,12 @@ def naive_paged_decode_attention(
         output: (batch, num_heads, head_dim)
     """
     # Use the fully vectorized path (no .item(), no Python loops) during CUDA
-    # graph capture, and unconditionally on MPS — MPS has no graph capture
-    # API, but the per-block .item() loop below is exactly the kind of
-    # data-dependent Python control flow that also breaks TorchScript tracing
-    # and is needlessly slow (dispatch-per-op) under Metal regardless.
-    if (q.is_cuda and torch.cuda.is_current_stream_capturing()) or q.device.type == "mps":
+    # execution, both eager and graph replay, and unconditionally on MPS.
+    # Restricting this path to stream capture made eager CUDA fall through to
+    # the per-block .item() loop below, introducing repeated GPU-to-CPU
+    # synchronizations and making eager-vs-graph comparisons measure two
+    # different attention implementations.
+    if q.device.type in ("cuda", "mps"):
         return _tensor_paged_decode_attention(
             q, k_cache, v_cache, block_table, cache_seqlens, num_kv_groups,
             softmax_scale or 1.0 / math.sqrt(q.shape[-1]),
