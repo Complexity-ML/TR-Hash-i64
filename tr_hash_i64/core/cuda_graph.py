@@ -120,7 +120,9 @@ class CUDAGraphRunner:
         Run with the best matching captured graph.
 
         Pads to the nearest captured size, replays graph, slices output.
-        Falls back to direct forward if no suitable graph exists.
+        Falls back to direct forward if no suitable graph exists. Captured
+        output is a borrowed view that remains valid until the next replay of
+        the same graph size; callers must consume it before that replay.
         """
         batch_size = token_ids.shape[0]
         graph_size = self._find_best_size(batch_size)
@@ -131,10 +133,12 @@ class CUDAGraphRunner:
 
         static_in = self.static_inputs[graph_size]
 
-        # Zero-fill then copy actual data
-        static_in["token_ids"].zero_()
-        static_in["positions"].zero_()
-        static_in["expert_ids"].zero_()
+        # Actual rows are fully overwritten below. Only clear the padded tail;
+        # zeroing every static buffer on every replay adds redundant kernels.
+        if batch_size < graph_size:
+            static_in["token_ids"][batch_size:].zero_()
+            static_in["positions"][batch_size:].zero_()
+            static_in["expert_ids"][batch_size:].zero_()
 
         static_in["token_ids"][:batch_size].copy_(token_ids)
         static_in["positions"][:batch_size].copy_(positions)
@@ -143,8 +147,8 @@ class CUDAGraphRunner:
         # Replay captured graph
         self.graphs[graph_size].replay()
 
-        # Clone to prevent next replay from overwriting this output
-        return self.static_outputs[graph_size][:batch_size].clone()
+        # Avoid a full [batch, vocab] allocation and device-to-device copy.
+        return self.static_outputs[graph_size][:batch_size]
 
     @property
     def is_captured(self) -> bool:
