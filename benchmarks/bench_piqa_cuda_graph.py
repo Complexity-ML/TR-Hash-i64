@@ -43,12 +43,14 @@ def parse_args():
     p.add_argument("--output", default="piqa_cuda_graph_results.json")
     p.add_argument("--dtype", choices=("float16", "bfloat16"), default="float16")
     p.add_argument("--max-seq-len", type=int, default=256)
+    p.add_argument("--max-batch-size", type=int, default=64)
     return p.parse_args()
 
 
 class ChoiceScorer:
-    def __init__(self, model_dir: str, dtype: torch.dtype, max_seq_len: int):
+    def __init__(self, model_dir: str, dtype: torch.dtype, max_seq_len: int, max_batch_size: int):
         self.model_dir = model_dir
+        self.max_batch_size = max_batch_size
         self.tokenizer = I64Tokenizer(str(Path(model_dir) / "tokenizer.json"))
         self.model = load_model_by_name(
             "tr-hash-moe-200m",
@@ -62,17 +64,17 @@ class ChoiceScorer:
             model=self.model,
             num_experts=self.model.config.num_experts,
             vocab_size=self.model.config.vocab_size,
-            max_batch_size=16,
+            max_batch_size=max_batch_size,
             max_seq_len=max_seq_len,
-            max_kv_blocks=256,
+            max_kv_blocks=max(256, max_batch_size * 16),
             enable_prefix_caching=False,
             device="cuda",
         )
         self.engine.warmup_and_capture_graphs()
         if self.engine.cuda_graph_runner is None or not self.engine.cuda_graph_runner.is_captured:
             raise RuntimeError("CUDA Graph capture failed")
-        if 16 not in self.engine.cuda_graph_runner._captured_sizes:
-            raise RuntimeError("batch-16 CUDA Graph was not captured")
+        if max_batch_size not in self.engine.cuda_graph_runner._captured_sizes:
+            raise RuntimeError(f"batch-{max_batch_size} CUDA Graph was not captured")
 
     def encode_pair(self, context: str, continuation: str):
         # Match lm-eval's convention: move trailing context whitespace to continuation.
@@ -179,7 +181,7 @@ def run_mode(scorer, rows, use_graph: bool):
     decode_calls = 0
     scores = []
     decode_forward_steps = 0
-    example_batch_size = 8
+    example_batch_size = max(1, scorer.max_batch_size // 2)
     for start in range(0, len(rows), example_batch_size):
         chunk = rows[start : start + example_batch_size]
         pairs = [(row["goal"], solution) for row in chunk for solution in (row["sol1"], row["sol2"])]
@@ -224,7 +226,7 @@ def main():
     rows = load_piqa_validation(Path("/workspace/datasets/piqa"))
     if args.limit > 0:
         rows = rows[: args.limit]
-    scorer = ChoiceScorer(args.model_dir, dtype, args.max_seq_len)
+    scorer = ChoiceScorer(args.model_dir, dtype, args.max_seq_len, args.max_batch_size)
     print(
         "model_loaded",
         sum(p.numel() for p in scorer.model.parameters()),
@@ -255,6 +257,7 @@ def main():
         "model_dir": args.model_dir,
         "dtype": args.dtype,
         "max_seq_len": args.max_seq_len,
+        "max_batch_size": args.max_batch_size,
         "dataset": "ybisk/piqa",
         "split": "validation",
         "cuda": {
