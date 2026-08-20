@@ -124,6 +124,7 @@ class I64Engine:
         self.num_experts = num_experts
         self.hidden_dim = hidden_dim
         self.vocab_size = vocab_size
+        self.max_seq_len = max_seq_len
         if max_kv_blocks <= 0:  # 0 = auto
             max_kv_blocks = max(256, max_batch_size * 8)
         self.max_kv_blocks = max_kv_blocks
@@ -250,7 +251,10 @@ class I64Engine:
         num_blocks = self.max_kv_blocks if self.max_kv_blocks > 0 else max(256, max_seqs * 8)
         # Cap max_blocks_per_seq to model's max context window (avoids huge static
         # tensor allocations in _tensor_paged_decode_attention during CUDA graph capture)
-        max_pos = getattr(config, 'max_position_embeddings', 2048)
+        max_pos = min(
+            getattr(config, 'max_position_embeddings', 2048),
+            self.max_seq_len,
+        )
         max_blocks_per_seq = min(num_blocks, (max_pos + block_size - 1) // block_size)
 
         self.kv_cache = PagedKVCache(
