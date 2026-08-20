@@ -146,6 +146,7 @@ class PagedKVCache:
         self._graph_mode: bool = False
         self._graph_block_table: Optional[torch.Tensor] = None
         self._graph_cache_seqlens: Optional[torch.Tensor] = None
+        self._graph_dummy_block_id: Optional[int] = None
 
     # ======================================================================
     # Device resolution
@@ -527,12 +528,19 @@ class PagedKVCache:
     # ======================================================================
 
     def init_graph_buffers(self, max_batch_size: int) -> None:
-        """Allocate static buffers (same tensor addresses across captures)."""
+        """Allocate static buffers and an isolated block for padded graph rows."""
+        if self._graph_dummy_block_id is None:
+            [dummy_block] = self.pool.get_new_blocks(1)
+            self._graph_dummy_block_id = dummy_block.block_id
+            self._zero_block(dummy_block.block_id)
+            self._dirty_blocks.discard(dummy_block.block_id)
+
         self._graph_block_table = torch.full(
-            (max_batch_size, self.max_blocks_per_seq), 0,
+            (max_batch_size, self.max_blocks_per_seq),
+            self._graph_dummy_block_id,
             dtype=torch.int32, device=self.device,
         )
-        self._graph_cache_seqlens = torch.zeros(
+        self._graph_cache_seqlens = torch.ones(
             max_batch_size, dtype=torch.int32, device=self.device,
         )
         self._graph_batch_range = torch.arange(
@@ -545,6 +553,9 @@ class PagedKVCache:
             return
         self._graph_block_table[:n].copy_(self.block_table[seq_ids])
         self._graph_cache_seqlens[:n].copy_(self.seq_lens[seq_ids])
+        if n < self._graph_block_table.shape[0]:
+            self._graph_block_table[n:].fill_(self._graph_dummy_block_id)
+            self._graph_cache_seqlens[n:].fill_(1)
         self._graph_mode = True
 
     def exit_graph_mode(self, seq_ids: Optional[List[int]] = None) -> None:
