@@ -142,6 +142,30 @@ def naive_varlen_attention(
     if v.dtype != compute_dtype:
         v = v.to(compute_dtype)
 
+    # Fast path for padded/equal-width CUDA batches (evaluation and
+    # batched prefill). Keep the whole batch in one SDPA call instead of
+    # launching a Python loop and separate attention kernels per sequence.
+    if (
+        q.is_cuda
+        and sliding_window is None
+        and len(tokens_per_seq) > 1
+        and len(set(tokens_per_seq)) == 1
+    ):
+        batch_size = len(tokens_per_seq)
+        seq_len = tokens_per_seq[0]
+        q_b = q.reshape(batch_size, seq_len, q.shape[1], q.shape[2]).transpose(1, 2)
+        k_b = k.reshape(batch_size, seq_len, k.shape[1], k.shape[2]).transpose(1, 2)
+        v_b = v.reshape(batch_size, seq_len, v.shape[1], v.shape[2]).transpose(1, 2)
+        if num_kv_groups > 1:
+            k_b = k_b.repeat_interleave(num_kv_groups, dim=1)
+            v_b = v_b.repeat_interleave(num_kv_groups, dim=1)
+        out = F.scaled_dot_product_attention(
+            q_b, k_b, v_b,
+            is_causal=True,
+            scale=softmax_scale,
+        )
+        return out.transpose(1, 2).reshape(-1, q.shape[1], q.shape[2])
+
     outputs = []
     offset = 0
 
