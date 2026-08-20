@@ -16,7 +16,7 @@ from tr_hash_i64.core.tokenizer import I64Tokenizer
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-dir", required=True)
-    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--max-length", type=int, default=2048)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--output", default="piqa_teacher_forced_results.json")
