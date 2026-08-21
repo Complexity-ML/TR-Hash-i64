@@ -40,6 +40,7 @@ def cmd_serve(args):
             api_key=getattr(args, 'api_key', None),
             rate_limit=getattr(args, 'rate_limit', 0),
             max_pending=getattr(args, 'max_pending', 0),
+            context_compact_tokens=getattr(args, 'context_compact_tokens', None),
             rag_index_path=getattr(args, 'rag_index', None),
             sandbox_enabled=getattr(args, 'sandbox', False),
             sandbox_timeout=getattr(args, 'sandbox_timeout', 30),
@@ -70,6 +71,8 @@ def cmd_serve(args):
                 forward_args += ["--chat-template", args.chat_template]
             if args.quantization and args.quantization != "none":
                 forward_args += ["--quantization", args.quantization]
+            if args.context_compact_tokens is not None:
+                forward_args += ["--context-compact-tokens", str(args.context_compact_tokens)]
 
             _logger.info("Disaggregated mode: GPU 0 = prefill, GPU 1 = decode")
             rc = launch_disaggregated(tp_size=args.tp, args=forward_args)
@@ -88,6 +91,8 @@ def cmd_serve(args):
             forward_args += ["--chat-template", args.chat_template]
         if args.quantization and args.quantization != "none":
             forward_args += ["--quantization", args.quantization]
+        if args.context_compact_tokens is not None:
+            forward_args += ["--context-compact-tokens", str(args.context_compact_tokens)]
 
         rc = launch_distributed(tp_size=args.tp, pp_size=args.pp, args=forward_args)
         sys.exit(rc)
@@ -236,6 +241,7 @@ def cmd_serve(args):
         api_key=getattr(args, 'api_key', None),
         rate_limit=getattr(args, 'rate_limit', 0),
         max_pending=getattr(args, 'max_pending', 0),
+        context_compact_tokens=getattr(args, 'context_compact_tokens', None),
         rag_index_path=getattr(args, 'rag_index', None),
         sandbox_enabled=getattr(args, 'sandbox', False),
         sandbox_timeout=getattr(args, 'sandbox_timeout', 30),
@@ -523,6 +529,8 @@ def main():
                          help="Max requests per minute per IP (0 = unlimited)")
     p_serve.add_argument("--max-pending", type=int, default=0,
                          help="Max pending requests before rejecting (0 = unlimited)")
+    p_serve.add_argument("--context-compact-tokens", type=int, default=None,
+                         help="Compact chat prompts once they exceed this token count")
     p_serve.add_argument("--rag-index", default=None,
                          help="Path to RAG index directory (enables /v1/rag/* endpoints)")
     p_serve.add_argument("--disaggregated", action="store_true",

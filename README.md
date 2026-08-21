@@ -122,6 +122,11 @@ summary, then removes the oldest unrepresented messages. An oversized essential
 message is reduced to a head-and-tail view as a final fallback. This processing
 is local and does not trigger a second model request.
 
+Use `--context-compact-tokens N` to compact earlier than the physical context
+limit. For example, `--context-compact-tokens 1024` starts rolling compaction
+once the rendered chat prompt exceeds 1,024 tokens while preserving the
+separate output-token reservation.
+
 Every non-streaming chat response includes `context_metrics`; streaming
 responses expose the same object in the first SSE event:
 

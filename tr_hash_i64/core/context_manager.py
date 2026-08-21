@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
@@ -67,6 +67,7 @@ class ContextPlan:
     dropped_messages: int
     original_tokens: int
     summary_tokens: int
+    compact_at_tokens: Optional[int] = None
 
     @property
     def prompt_tokens(self) -> int:
@@ -85,7 +86,11 @@ class ContextPlan:
             "compressed": self.compressed,
             "max_seq_len": self.max_seq_len,
             "reserved_output_tokens": self.reserved_output_tokens,
-            "available_prompt_tokens": self.max_seq_len - self.reserved_output_tokens,
+            "available_prompt_tokens": min(
+                self.max_seq_len - self.reserved_output_tokens,
+                self.compact_at_tokens or self.max_seq_len,
+            ),
+            "compact_at_tokens": self.compact_at_tokens,
             "original_messages": self.original_messages,
             "retained_messages": self.retained_messages,
             "summarized_messages": self.summarized_messages,
@@ -123,6 +128,7 @@ class ContextManager:
         max_seq_len: int,
         recent_turns: int = 2,
         max_summary_tokens: int = 256,
+        compact_at_tokens: Optional[int] = None,
     ):
         self.encode = encode
         self.decode = decode
@@ -130,6 +136,11 @@ class ContextManager:
         self.max_seq_len = int(max_seq_len)
         self.recent_turns = max(1, int(recent_turns))
         self.max_summary_tokens = max(16, int(max_summary_tokens))
+        self.compact_at_tokens = (
+            max(16, int(compact_at_tokens))
+            if compact_at_tokens is not None and int(compact_at_tokens) > 0
+            else None
+        )
 
     def fit(
         self,
@@ -140,6 +151,8 @@ class ContextManager:
         if max_output_tokens < 1:
             raise ContextWindowError("max_tokens must be >= 1")
         prompt_budget = self.max_seq_len - max_output_tokens
+        if self.compact_at_tokens is not None:
+            prompt_budget = min(prompt_budget, self.compact_at_tokens)
         if prompt_budget < 1:
             raise ContextWindowError(
                 f"max_tokens leaves no room for a prompt in the {self.max_seq_len}-token context window"
@@ -163,6 +176,7 @@ class ContextManager:
                 dropped_messages=0,
                 original_tokens=len(original_ids),
                 summary_tokens=0,
+                compact_at_tokens=self.compact_at_tokens,
             )
 
         systems = [message for message in normalized if message["role"] == "system"]
@@ -201,6 +215,7 @@ class ContextManager:
                     dropped_messages=summary_dropped,
                     original_tokens=len(original_ids),
                     summary_tokens=summary_tokens,
+                    compact_at_tokens=self.compact_at_tokens,
                 )
 
             if summary:
@@ -227,6 +242,7 @@ class ContextManager:
                         dropped_messages=summary_dropped,
                         original_tokens=len(original_ids),
                         summary_tokens=summary_tokens,
+                        compact_at_tokens=self.compact_at_tokens,
                     )
 
             if len(recent_turns) > 1:
@@ -255,6 +271,7 @@ class ContextManager:
             dropped_messages=older_count,
             original_tokens=len(original_ids),
             summary_tokens=0,
+            compact_at_tokens=self.compact_at_tokens,
         )
 
     @staticmethod

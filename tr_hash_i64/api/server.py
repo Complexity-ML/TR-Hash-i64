@@ -93,6 +93,7 @@ class I64Server(HelpersMixin, CompletionsMixin, AdminMixin, RAGMixin, AgentMixin
         api_key: Optional[str] = None,
         rate_limit: int = 0,
         max_pending: int = 0,
+        context_compact_tokens: Optional[int] = None,
         rag_index_path: Optional[str] = None,
         sandbox_enabled: bool = False,
         sandbox_timeout: int = 30,
@@ -135,6 +136,7 @@ class I64Server(HelpersMixin, CompletionsMixin, AdminMixin, RAGMixin, AgentMixin
         self.api_key = api_key
         self._rate_limiter = TokenBucketRateLimiter(rate_limit) if rate_limit > 0 else None
         self._max_pending = max_pending
+        self.context_compact_tokens = context_compact_tokens
         self._start_time = time.monotonic()
         self._shutting_down = False
         self._last_expert_response: dict | None = None

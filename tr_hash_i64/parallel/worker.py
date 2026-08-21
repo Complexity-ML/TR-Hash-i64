@@ -115,6 +115,7 @@ def _run_serve(args: list, tp, pp):
             model_name=parsed.model,
             host=parsed.host,
             port=parsed.port,
+            context_compact_tokens=getattr(parsed, "context_compact_tokens", None),
         )
         server.run()
     else:

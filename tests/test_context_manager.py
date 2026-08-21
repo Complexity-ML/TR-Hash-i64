@@ -27,7 +27,7 @@ def _render(messages):
     ) + "<assistant>"
 
 
-def _manager(max_seq_len=512, recent_turns=2, max_summary_tokens=96):
+def _manager(max_seq_len=512, recent_turns=2, max_summary_tokens=96, compact_at_tokens=None):
     return ContextManager(
         encode=_encode,
         decode=_decode,
@@ -35,6 +35,7 @@ def _manager(max_seq_len=512, recent_turns=2, max_summary_tokens=96):
         max_seq_len=max_seq_len,
         recent_turns=recent_turns,
         max_summary_tokens=max_summary_tokens,
+        compact_at_tokens=compact_at_tokens,
     )
 
 
@@ -123,6 +124,29 @@ def test_old_turns_are_summarized_and_recent_turns_are_kept():
     assert any("Answer 7:" in message["content"] for message in plan.messages)
     assert plan.summarized_messages > 0
     assert plan.tokens_saved > 0
+
+
+def test_context_compacts_at_configured_prompt_threshold():
+    messages = []
+    for index in range(8):
+        messages.extend(
+            [
+                {"role": "user", "content": f"Question {index}: " + ("detail " * 12)},
+                {"role": "assistant", "content": f"Answer {index}: " + ("result " * 12)},
+            ]
+        )
+
+    plan = _manager(max_seq_len=2048, compact_at_tokens=1024).fit(
+        messages,
+        max_output_tokens=512,
+    )
+
+    assert plan.original_tokens > 1024
+    assert plan.prompt_tokens + plan.reserved_output_tokens <= plan.max_seq_len
+    assert plan.compressed is True
+    assert plan.prompt_tokens <= 1024
+    assert plan.to_metrics()["compact_at_tokens"] == 1024
+    assert plan.to_metrics()["available_prompt_tokens"] == 1024
 
 
 def test_oversized_latest_message_is_head_tail_truncated():

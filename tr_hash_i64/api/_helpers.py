@@ -173,6 +173,7 @@ class HelpersMixin:
             decode=self._detokenize,
             render=self._render_chat_template,
             max_seq_len=max_seq_len,
+            compact_at_tokens=self.context_compact_tokens,
         )
         return manager.fit(
             self._normalize_chat_messages(messages),
