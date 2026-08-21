@@ -160,6 +160,49 @@ async def test_models_reports_prepacked_parameter_count(client, server):
 
 
 @pytest.mark.asyncio
+async def test_models_reports_converted_tr_hash_model_as_moe(client, server):
+    """Converted checkpoints can lose mlp_type but retain expert metadata."""
+    import torch.nn as nn
+    from types import SimpleNamespace
+
+    model = nn.Linear(3, 2)
+    model.config = SimpleNamespace(
+        mlp_type=None,
+        num_experts=4,
+        top_k=2,
+    )
+    server.sync_engine.model = model
+
+    resp = await client.get("/v1/models")
+    assert resp.status == 200
+    model_info = (await resp.json())["data"][0]
+    assert model_info["architecture"] == "tr-hash-moe"
+    assert model_info["num_experts"] == 4
+    assert model_info["top_k"] == 2
+
+
+@pytest.mark.asyncio
+async def test_models_reports_single_expert_model_as_dense(client, server):
+    import torch.nn as nn
+    from types import SimpleNamespace
+
+    model = nn.Linear(3, 2)
+    model.config = SimpleNamespace(
+        mlp_type=None,
+        num_experts=1,
+        top_k=1,
+    )
+    server.sync_engine.model = model
+
+    resp = await client.get("/v1/models")
+    assert resp.status == 200
+    model_info = (await resp.json())["data"][0]
+    assert model_info["architecture"] == "dense"
+    assert "num_experts" not in model_info
+    assert "top_k" not in model_info
+
+
+@pytest.mark.asyncio
 async def test_expert_stats_report_real_top2_routes(client, server):
     import torch
     import torch.nn as nn

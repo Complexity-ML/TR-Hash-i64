@@ -43,11 +43,28 @@ class AdminMixin:
         )
         config = getattr(model, "config", None)
         if config is not None:
-            metadata["architecture"] = (
-                "token-routed"
-                if getattr(config, "mlp_type", "") == "token_routed"
-                else "dense"
+            mlp_type = str(getattr(config, "mlp_type", "") or "")
+            num_experts = int(
+                getattr(
+                    config,
+                    "num_experts",
+                    getattr(self.sync_engine, "num_experts", 1),
+                )
+                or 1
             )
+            is_tr_hash_moe = num_experts > 1 or mlp_type in {
+                "token_routed",
+                "tr_hash_engine",
+                "tr_hash_moe",
+            }
+            metadata["architecture"] = (
+                "tr-hash-moe" if is_tr_hash_moe else "dense"
+            )
+            if is_tr_hash_moe:
+                metadata["num_experts"] = num_experts
+                metadata["top_k"] = int(
+                    getattr(config, "top_k", 1) or 1
+                )
         return metadata
 
     async def handle_health(self, request: web.Request) -> web.Response:
