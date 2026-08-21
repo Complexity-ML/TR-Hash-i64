@@ -104,6 +104,18 @@ async def rate_client(rate_limited_server):
         yield c
 
 
+def test_stream_decoder_waits_for_complete_utf8_character():
+    server = I64Server(engine=None, tokenizer=None)
+
+    delta, emitted = server._stream_text_delta([0xC3], "")
+    assert delta == ""
+    assert emitted == ""
+
+    delta, emitted = server._stream_text_delta([0xC3, 0xB7], emitted)
+    assert delta == "÷"
+    assert emitted == "÷"
+
+
 # =====================================================================
 # Health & Models
 # =====================================================================

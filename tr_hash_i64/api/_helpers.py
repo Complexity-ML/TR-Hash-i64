@@ -58,6 +58,18 @@ class HelpersMixin:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self._tokenize_pool, self._detokenize, token_ids)
 
+    def _stream_text_delta(
+        self,
+        token_ids: List[int],
+        emitted_text: str,
+        *,
+        final: bool = False,
+    ) -> tuple[str, str]:
+        """Decode a stable streaming suffix without leaking partial UTF-8."""
+        decoded = self._detokenize(token_ids)
+        stable_text = decoded if final else decoded.rstrip("\ufffd")
+        return stable_text[len(emitted_text):], stable_text
+
     # ------------------------------------------------------------------
     # Content extraction
     # ------------------------------------------------------------------

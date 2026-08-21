@@ -150,11 +150,13 @@ class CompletionsMixin:
                 finish_reason = item[1]
                 break
             output_ids.append(item)
-            full_text = self._detokenize(output_ids)
-            token_text = full_text[len(prev_text):]
-            prev_text = full_text
+            token_text, prev_text = self._stream_text_delta(output_ids, prev_text)
             if not token_text:
                 continue
+            yield f"data: {json.dumps({'id': stream_id, 'object': 'text_completion', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'text': token_text, 'finish_reason': None}]})}\n\n"
+
+        token_text, prev_text = self._stream_text_delta(output_ids, prev_text, final=True)
+        if token_text:
             yield f"data: {json.dumps({'id': stream_id, 'object': 'text_completion', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'text': token_text, 'finish_reason': None}]})}\n\n"
 
         yield f"data: {json.dumps({'id': stream_id, 'object': 'text_completion', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'text': '', 'finish_reason': finish_reason}]})}\n\n"
@@ -211,11 +213,13 @@ class CompletionsMixin:
                 finish_reason = item[1]
                 break
             output_ids.append(item)
-            full_text = self._detokenize(output_ids)
-            token_text = full_text[len(prev_text):]
-            prev_text = full_text
+            token_text, prev_text = self._stream_text_delta(output_ids, prev_text)
             if not token_text:
                 continue
+            yield f"data: {json.dumps({'id': stream_id, 'object': 'chat.completion.chunk', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'content': token_text}, 'finish_reason': None}]})}\n\n"
+
+        token_text, prev_text = self._stream_text_delta(output_ids, prev_text, final=True)
+        if token_text:
             yield f"data: {json.dumps({'id': stream_id, 'object': 'chat.completion.chunk', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'content': token_text}, 'finish_reason': None}]})}\n\n"
 
         response_prefill = getattr(request, "_chat_response_prefill", "")
@@ -249,11 +253,13 @@ class CompletionsMixin:
                             finish_reason = item[1]
                             break
                         final_ids.append(item)
-                        decoded = self._detokenize(final_ids)
-                        token_text = decoded[len(final_text):]
-                        final_text = decoded
+                        token_text, final_text = self._stream_text_delta(final_ids, final_text)
                         if token_text:
                             yield f"data: {json.dumps({'id': stream_id, 'object': 'chat.completion.chunk', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'content': token_text}, 'finish_reason': None}]})}\n\n"
+
+                    token_text, final_text = self._stream_text_delta(final_ids, final_text, final=True)
+                    if token_text:
+                        yield f"data: {json.dumps({'id': stream_id, 'object': 'chat.completion.chunk', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'content': token_text}, 'finish_reason': None}]})}\n\n"
 
             if "</final>" not in final_text:
                 closing = "\n</final>"

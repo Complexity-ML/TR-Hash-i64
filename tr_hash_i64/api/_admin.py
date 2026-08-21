@@ -380,13 +380,16 @@ class AdminMixin:
                     ):
                         last_token_id = token_id
                         output_ids.append(token_id)
-                        full = self._detokenize(output_ids)
-                        token_text = full[len(prev_text):]
-                        prev_text = full
+                        token_text, prev_text = self._stream_text_delta(output_ids, prev_text)
                         if token_text:
                             await ws.send_json({"id": stream_id, "object": "text_completion.chunk",
                                                "created": created, "model": self.model_name,
                                                "choices": [{"index": 0, "text": token_text, "finish_reason": None}]})
+                    token_text, prev_text = self._stream_text_delta(output_ids, prev_text, final=True)
+                    if token_text:
+                        await ws.send_json({"id": stream_id, "object": "text_completion.chunk",
+                                           "created": created, "model": self.model_name,
+                                           "choices": [{"index": 0, "text": token_text, "finish_reason": None}]})
                     eos_id = getattr(self.tokenizer, 'eos_token_id', None)
                     ws_finish = "stop" if last_token_id is None or (eos_id and last_token_id == eos_id) else "length"
                     await ws.send_json({"id": stream_id, "object": "text_completion.chunk",
