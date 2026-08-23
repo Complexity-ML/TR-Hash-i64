@@ -16,19 +16,25 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 
-_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
-_THINK_OPEN_RE = re.compile(r"<think>", re.IGNORECASE)
-_FINAL_BLOCK_RE = re.compile(r"<final>(.*?)</final>", re.IGNORECASE | re.DOTALL)
-_FINAL_OPEN_RE = re.compile(r"<final>", re.IGNORECASE)
+_THINK_BLOCK_RE = re.compile(
+    r"<\|think_start\|>.*?<\|think_end\|>",
+    re.DOTALL,
+)
+_THINK_OPEN_RE = re.compile(r"<\|think_start\|>")
+_FINAL_BLOCK_RE = re.compile(
+    r"<\|final_start\|>(.*?)<\|final_end\|>",
+    re.DOTALL,
+)
+_FINAL_OPEN_RE = re.compile(r"<\|final_start\|>")
 
 
 def sanitize_assistant_reasoning(content: str) -> str:
     """Keep only model-facing final content from an assistant history turn.
 
     Hidden reasoning is useful while producing one answer but must not become
-    evidence for the next turn.  A truncated ``<think>`` is especially unsafe:
-    replaying it makes the next generation continue the old chain instead of
-    answering the newest user message.
+    evidence for the next turn. A truncated native thinking envelope is
+    especially unsafe: replaying it makes the next generation continue the
+    old chain instead of answering the newest user message.
     """
 
     final_blocks = _FINAL_BLOCK_RE.findall(content)
@@ -37,15 +43,15 @@ def sanitize_assistant_reasoning(content: str) -> str:
 
     final_open = _FINAL_OPEN_RE.search(content)
     if final_open:
-        return content[final_open.end():].replace("</final>", "").strip()
+        return content[final_open.end() :].replace("<|final_end|>", "").strip()
 
     # Remove complete thought blocks.  If a thought was truncated, discard the
     # unfinished suffix rather than feeding it back as conversational context.
     visible = _THINK_BLOCK_RE.sub("", content)
     think_open = _THINK_OPEN_RE.search(visible)
     if think_open:
-        visible = visible[:think_open.start()]
-    return visible.replace("</think>", "").strip()
+        visible = visible[: think_open.start()]
+    return visible.replace("<|think_end|>", "").strip()
 
 
 class ContextWindowError(ValueError):
@@ -180,10 +186,12 @@ class ContextManager:
             )
 
         systems = [message for message in normalized if message["role"] == "system"]
-        conversation = [message for message in normalized if message["role"] != "system"]
+        conversation = [
+            message for message in normalized if message["role"] != "system"
+        ]
         turns = self._group_turns(conversation)
-        recent_turns = turns[-self.recent_turns:] if turns else []
-        older_turns = turns[:-len(recent_turns)] if recent_turns else turns
+        recent_turns = turns[-self.recent_turns :] if turns else []
+        older_turns = turns[: -len(recent_turns)] if recent_turns else turns
 
         # Always preserve at least the newest turn. Older retained turns may be
         # rolled into the summary if the exact template overhead is too large.
@@ -219,17 +227,21 @@ class ContextManager:
                 )
 
             if summary:
-                summary, summarized_count, summary_dropped = self._shrink_summary_to_fit(
-                    systems,
-                    recent_messages,
-                    older_messages,
-                    prompt_budget,
-                    summary_budget,
+                summary, summarized_count, summary_dropped = (
+                    self._shrink_summary_to_fit(
+                        systems,
+                        recent_messages,
+                        older_messages,
+                        prompt_budget,
+                        summary_budget,
+                    )
                 )
                 candidate = systems + ([summary] if summary else []) + recent_messages
                 prompt, prompt_ids = self._render_and_encode(candidate)
                 if len(prompt_ids) <= prompt_budget:
-                    summary_tokens = len(self.encode(summary["content"])) if summary else 0
+                    summary_tokens = (
+                        len(self.encode(summary["content"])) if summary else 0
+                    )
                     return ContextPlan(
                         messages=candidate,
                         prompt=prompt,
@@ -364,13 +376,19 @@ class ContextManager:
 
         dropped = max(0, len(messages) - included)
         if not selected:
-            marker = f"{self.SUMMARY_PREFIX}\n- [{len(messages)} earlier messages omitted.]"
+            marker = (
+                f"{self.SUMMARY_PREFIX}\n- [{len(messages)} earlier messages omitted.]"
+            )
             marker_ids = self.encode(marker)
             if len(marker_ids) > token_budget:
                 marker = self.decode(marker_ids[:token_budget])
             return {"role": "system", "content": marker}, 0, len(messages)
 
-        suffix = f"\n- [{dropped} earlier message{'s' if dropped != 1 else ''} omitted.]" if dropped else ""
+        suffix = (
+            f"\n- [{dropped} earlier message{'s' if dropped != 1 else ''} omitted.]"
+            if dropped
+            else ""
+        )
         content = f"{self.SUMMARY_PREFIX}\n" + "\n".join(selected) + suffix
         return {"role": "system", "content": content}, included, dropped
 

@@ -21,13 +21,18 @@ def _decode(token_ids):
 
 
 def _render(messages):
-    return "".join(
-        f"<{message['role']}>{message['content']}</{message['role']}>"
-        for message in messages
-    ) + "<assistant>"
+    return (
+        "".join(
+            f"<{message['role']}>{message['content']}</{message['role']}>"
+            for message in messages
+        )
+        + "<assistant>"
+    )
 
 
-def _manager(max_seq_len=512, recent_turns=2, max_summary_tokens=96, compact_at_tokens=None):
+def _manager(
+    max_seq_len=512, recent_turns=2, max_summary_tokens=96, compact_at_tokens=None
+):
     return ContextManager(
         encode=_encode,
         decode=_decode,
@@ -56,7 +61,10 @@ def test_context_under_budget_is_unchanged():
 
 
 def test_complete_reasoning_history_keeps_only_final_answer():
-    content = "<think>old private chain</think>\n<final>Four.</final>"
+    content = (
+        "<|think_start|>old private chain<|think_end|>\n"
+        "<|final_start|>Four.<|final_end|>"
+    )
 
     assert sanitize_assistant_reasoning(content) == "Four."
 
@@ -64,7 +72,10 @@ def test_complete_reasoning_history_keeps_only_final_answer():
 def test_truncated_reasoning_history_is_not_replayed():
     messages = [
         {"role": "user", "content": "What is 2 + 2?"},
-        {"role": "assistant", "content": "<think>unfinished old chain"},
+        {
+            "role": "assistant",
+            "content": "<|think_start|>unfinished old chain",
+        },
         {"role": "user", "content": "What is 3 + 3?"},
     ]
 
@@ -79,14 +90,19 @@ def test_api_normalization_sanitizes_reasoning_before_template_rendering():
     helper = HelpersMixin()
     helper._extract_content_text = lambda content: content
 
-    normalized = helper._normalize_chat_messages([
-        {"role": "user", "content": "First question"},
-        {
-            "role": "assistant",
-            "content": "<think>private stale chain</think><final>First answer</final>",
-        },
-        {"role": "user", "content": "Second question"},
-    ])
+    normalized = helper._normalize_chat_messages(
+        [
+            {"role": "user", "content": "First question"},
+            {
+                "role": "assistant",
+                "content": (
+                    "<|think_start|>private stale chain<|think_end|>"
+                    "<|final_start|>First answer<|final_end|>"
+                ),
+            },
+            {"role": "user", "content": "Second question"},
+        ]
+    )
 
     assert normalized == [
         {"role": "user", "content": "First question"},
@@ -132,7 +148,10 @@ def test_context_compacts_at_configured_prompt_threshold():
         messages.extend(
             [
                 {"role": "user", "content": f"Question {index}: " + ("detail " * 12)},
-                {"role": "assistant", "content": f"Answer {index}: " + ("result " * 12)},
+                {
+                    "role": "assistant",
+                    "content": f"Answer {index}: " + ("result " * 12),
+                },
             ]
         )
 

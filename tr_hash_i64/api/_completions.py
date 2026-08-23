@@ -4,13 +4,12 @@ tr-hash-i64 :: Completions Mixin
 /v1/completions and /v1/chat/completions handlers + async streaming.
 """
 
-import asyncio
 import hashlib
 import json
 import time
 import uuid
 from dataclasses import replace
-from typing import AsyncGenerator, Dict, List, Optional
+from typing import AsyncGenerator, List, Optional
 
 from aiohttp import web
 
@@ -22,25 +21,48 @@ logger = get_logger("tr_hash_i64.server")
 
 
 class CompletionsMixin:
-
-    _THINK_RESPONSE_PREFILL = "<think>\n"
-    _THINK_FINAL_TRANSITION = "\n</think>\n<final>\n"
+    _NATIVE_THINK_RESPONSE_PREFILL = "<|think_start|>"
+    _NATIVE_THINK_FINAL_TRANSITION = "<|think_end|><|final_start|>"
+    _NATIVE_THINK_FINAL_CLOSING = "<|final_end|>"
 
     @classmethod
     def _chat_response_prefill(cls, prompt: str) -> str:
         """Restore a generation prefill in the assistant API content.
 
-        A chat template may end the prompt with ``<think>`` so the model starts
-        directly inside its reasoning envelope.  Because those tokens belong
-        to the prompt, generation APIs would otherwise omit the opening tag
-        while still returning ``</think>`` later in the response.
+        A v2 chat template may end the prompt with ``<|think_start|>`` so the
+        model starts directly inside its reasoning envelope. Because that
+        token belongs to the prompt, generation APIs would otherwise omit the
+        opening marker from the response.
         """
 
-        return (
-            cls._THINK_RESPONSE_PREFILL
-            if prompt.endswith(cls._THINK_RESPONSE_PREFILL)
-            else ""
+        start = cls._NATIVE_THINK_RESPONSE_PREFILL
+        index = prompt.rfind(start)
+        if index < 0:
+            return ""
+        suffix = prompt[index:]
+        # Completed envelopes from earlier assistant turns must never be
+        # mistaken for a generation prefill. A template may append a short
+        # seed after the opening token, so return the whole suffix.
+        completed_markers = (
+            "<|think_end|>",
+            cls._NATIVE_THINK_FINAL_CLOSING,
         )
+        return "" if any(marker in suffix for marker in completed_markers) else suffix
+
+    @classmethod
+    def _chat_reasoning_contract(
+        cls,
+        response_prefill: str,
+    ) -> tuple[str, str, str] | None:
+        """Return end marker, final transition and final closing for a prefill."""
+
+        if response_prefill.startswith(cls._NATIVE_THINK_RESPONSE_PREFILL):
+            return (
+                "<|think_end|>",
+                cls._NATIVE_THINK_FINAL_TRANSITION,
+                cls._NATIVE_THINK_FINAL_CLOSING,
+            )
+        return None
 
     # ------------------------------------------------------------------
     # Core async generation
@@ -94,7 +116,7 @@ class CompletionsMixin:
         prompt_ids = getattr(request, "_prompt_token_ids", None)
         if prompt_ids is None:
             prompt_ids = await self._tokenize_async(request.prompt)
-        pixel_values = getattr(request, '_pixel_values', None)
+        pixel_values = getattr(request, "_pixel_values", None)
         ns = self._cache_namespace(api_key, request.user)
 
         result = await self.async_engine.generate(
@@ -106,11 +128,14 @@ class CompletionsMixin:
         )
 
         if len(result.output_tokens) <= 3:
-            eos_cfg = getattr(self.async_engine.engine.model, 'config', None)
-            eos_id = getattr(eos_cfg, 'eos_token_id', '?') if eos_cfg else '?'
+            eos_cfg = getattr(self.async_engine.engine.model, "config", None)
+            eos_id = getattr(eos_cfg, "eos_token_id", "?") if eos_cfg else "?"
             logger.warning(
                 "[DEBUG] Short generation: prompt_ids=%s output_tokens=%s eos_config=%s finish=%s",
-                prompt_ids[-5:], result.output_tokens, eos_id, result.finish_reason,
+                prompt_ids[-5:],
+                result.output_tokens,
+                eos_id,
+                result.finish_reason,
             )
 
         resp = self._build_response(
@@ -123,18 +148,28 @@ class CompletionsMixin:
             resp._context_metrics = context_metrics
         latency_ms = (time.monotonic() - t0) * 1000
         from tr_hash_i64.api.types import compute_partition
+
         partition = compute_partition(api_key, getattr(request, "user", None))
-        self._usage_tracker.record(api_key or "", len(prompt_ids), len(result.output_tokens))
+        self._usage_tracker.record(
+            api_key or "", len(prompt_ids), len(result.output_tokens)
+        )
         self._latency_tracker.record(endpoint, latency_ms)
         self._request_logger.log_request(
-            endpoint=endpoint, status=200, latency_ms=latency_ms,
-            prompt_tokens=len(prompt_ids), completion_tokens=len(result.output_tokens),
-            api_key=api_key, request_id=resp.id, partition=partition,
+            endpoint=endpoint,
+            status=200,
+            latency_ms=latency_ms,
+            prompt_tokens=len(prompt_ids),
+            completion_tokens=len(result.output_tokens),
+            api_key=api_key,
+            request_id=resp.id,
+            partition=partition,
             context_metrics=context_metrics,
         )
         return resp
 
-    async def _async_stream(self, request: CompletionRequest, api_key: Optional[str] = None) -> AsyncGenerator[str, None]:
+    async def _async_stream(
+        self, request: CompletionRequest, api_key: Optional[str] = None
+    ) -> AsyncGenerator[str, None]:
         prompt_ids = getattr(request, "_prompt_token_ids", None)
         if prompt_ids is None:
             prompt_ids = await self._tokenize_async(request.prompt)
@@ -160,7 +195,9 @@ class CompletionsMixin:
                 continue
             yield f"data: {json.dumps({'id': stream_id, 'object': 'text_completion', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'text': token_text, 'finish_reason': None}]})}\n\n"
 
-        token_text, prev_text = self._stream_text_delta(output_ids, prev_text, final=True)
+        token_text, prev_text = self._stream_text_delta(
+            output_ids, prev_text, final=True
+        )
         if token_text:
             yield f"data: {json.dumps({'id': stream_id, 'object': 'text_completion', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'text': token_text, 'finish_reason': None}]})}\n\n"
 
@@ -168,7 +205,10 @@ class CompletionsMixin:
         yield "data: [DONE]\n\n"
 
     async def _async_chat_stream(
-        self, request: CompletionRequest, tools: Optional[list] = None, api_key: Optional[str] = None,
+        self,
+        request: CompletionRequest,
+        tools: Optional[list] = None,
+        api_key: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
         prompt_ids = getattr(request, "_prompt_token_ids", None)
         if prompt_ids is None:
@@ -205,7 +245,7 @@ class CompletionsMixin:
         output_ids: List[int] = []
         prev_text = ""
         finish_reason = "length"
-        pixel_values = getattr(request, '_pixel_values', None)
+        pixel_values = getattr(request, "_pixel_values", None)
         async for item in self.async_engine.generate_stream(
             prompt_token_ids=prompt_ids,
             max_new_tokens=request.max_tokens,
@@ -223,30 +263,39 @@ class CompletionsMixin:
                 continue
             yield f"data: {json.dumps({'id': stream_id, 'object': 'chat.completion.chunk', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'content': token_text}, 'finish_reason': None}]})}\n\n"
 
-        token_text, prev_text = self._stream_chat_text_delta(output_ids, prev_text, final=True)
+        token_text, prev_text = self._stream_chat_text_delta(
+            output_ids, prev_text, final=True
+        )
         if token_text:
             yield f"data: {json.dumps({'id': stream_id, 'object': 'chat.completion.chunk', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'content': token_text}, 'finish_reason': None}]})}\n\n"
 
         response_prefill = getattr(request, "_chat_response_prefill", "")
-        if response_prefill and "</think>" not in prev_text:
-            transition = self._THINK_FINAL_TRANSITION
+        reasoning_contract = self._chat_reasoning_contract(response_prefill)
+        if reasoning_contract and reasoning_contract[0] not in prev_text:
+            _, transition, closing = reasoning_contract
             yield f"data: {json.dumps({'id': stream_id, 'object': 'chat.completion.chunk', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'content': transition}, 'finish_reason': None}]})}\n\n"
 
             transition_ids = await self._tokenize_async(transition)
-            total_budget = getattr(request, "_chat_total_max_tokens", request.max_tokens)
+            total_budget = getattr(
+                request, "_chat_total_max_tokens", request.max_tokens
+            )
             remaining = total_budget - len(output_ids) - len(transition_ids)
             final_text = ""
             if remaining > 0:
                 continuation_prompt = request.prompt + prev_text + transition
                 continuation_ids = await self._tokenize_async(continuation_prompt)
-                available = self.sync_engine.scheduler.max_seq_len - len(continuation_ids)
+                available = self.sync_engine.scheduler.max_seq_len - len(
+                    continuation_ids
+                )
                 final_budget = min(remaining, max(0, available))
                 if final_budget > 0:
                     final_ids: List[int] = []
                     async for item in self.async_engine.generate_stream(
                         prompt_token_ids=continuation_ids,
                         max_new_tokens=final_budget,
-                        sampling_params=request.to_sampling_params(tokenizer=self.tokenizer),
+                        sampling_params=request.to_sampling_params(
+                            tokenizer=self.tokenizer
+                        ),
                         pixel_values=pixel_values,
                         cache_namespace=ns,
                     ):
@@ -258,16 +307,19 @@ class CompletionsMixin:
                             finish_reason = item[1]
                             break
                         final_ids.append(item)
-                        token_text, final_text = self._stream_chat_text_delta(final_ids, final_text)
+                        token_text, final_text = self._stream_chat_text_delta(
+                            final_ids, final_text
+                        )
                         if token_text:
                             yield f"data: {json.dumps({'id': stream_id, 'object': 'chat.completion.chunk', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'content': token_text}, 'finish_reason': None}]})}\n\n"
 
-                    token_text, final_text = self._stream_chat_text_delta(final_ids, final_text, final=True)
+                    token_text, final_text = self._stream_chat_text_delta(
+                        final_ids, final_text, final=True
+                    )
                     if token_text:
                         yield f"data: {json.dumps({'id': stream_id, 'object': 'chat.completion.chunk', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'content': token_text}, 'finish_reason': None}]})}\n\n"
 
-            if "</final>" not in final_text:
-                closing = "\n</final>"
+            if closing not in final_text:
                 yield f"data: {json.dumps({'id': stream_id, 'object': 'chat.completion.chunk', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'content': closing}, 'finish_reason': None}]})}\n\n"
 
         yield f"data: {json.dumps({'id': stream_id, 'object': 'chat.completion.chunk', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': finish_reason}]})}\n\n"
@@ -280,15 +332,29 @@ class CompletionsMixin:
     async def handle_completions(self, request: web.Request) -> web.Response:
         """POST /v1/completions"""
         if self.async_engine is None:
-            return web.json_response({"error": {"message": "No model loaded", "type": "server_error"}}, status=503)
+            return web.json_response(
+                {"error": {"message": "No model loaded", "type": "server_error"}},
+                status=503,
+            )
         try:
             body = await request.json()
         except Exception:
-            return web.json_response({"error": {"message": "Invalid JSON", "type": "invalid_request_error"}}, status=400)
+            return web.json_response(
+                {"error": {"message": "Invalid JSON", "type": "invalid_request_error"}},
+                status=400,
+            )
 
         prompt = body.get("prompt")
         if not prompt:
-            return web.json_response({"error": {"message": "Missing 'prompt'", "type": "invalid_request_error"}}, status=400)
+            return web.json_response(
+                {
+                    "error": {
+                        "message": "Missing 'prompt'",
+                        "type": "invalid_request_error",
+                    }
+                },
+                status=400,
+            )
 
         req = CompletionRequest(
             prompt=prompt,
@@ -317,11 +383,17 @@ class CompletionsMixin:
         max_seq_len = self.sync_engine.scheduler.max_seq_len
         error = req.validate(max_seq_len=max_seq_len)
         if error:
-            return web.json_response({"error": {"message": error, "type": "invalid_request_error"}}, status=400)
+            return web.json_response(
+                {"error": {"message": error, "type": "invalid_request_error"}},
+                status=400,
+            )
         prompt_ids = await self._tokenize_async(req.prompt)
         error = req.validate(max_seq_len=max_seq_len, prompt_tokens=len(prompt_ids))
         if error:
-            return web.json_response({"error": {"message": error, "type": "invalid_request_error"}}, status=400)
+            return web.json_response(
+                {"error": {"message": error, "type": "invalid_request_error"}},
+                status=400,
+            )
         req._prompt_token_ids = prompt_ids
 
         auth = request.headers.get("Authorization", "")
@@ -342,8 +414,11 @@ class CompletionsMixin:
                 return response
 
             cache_kwargs = dict(
-                temperature=req.temperature, top_k=req.top_k, top_p=req.top_p,
-                min_p=req.min_p, typical_p=req.typical_p,
+                temperature=req.temperature,
+                top_k=req.top_k,
+                top_p=req.top_p,
+                min_p=req.min_p,
+                typical_p=req.typical_p,
                 repetition_penalty=req.repetition_penalty,
                 frequency_penalty=req.frequency_penalty,
                 presence_penalty=req.presence_penalty,
@@ -355,26 +430,45 @@ class CompletionsMixin:
 
             result = await self._async_complete(req, api_key=req_api_key)
             result_dict = result.to_dict()
-            self._request_cache.put(req.prompt, req.max_tokens, result_dict, **cache_kwargs)
+            self._request_cache.put(
+                req.prompt, req.max_tokens, result_dict, **cache_kwargs
+            )
             return web.json_response(result_dict)
         except (ConnectionResetError, ConnectionError):
             return web.Response(status=499, text="Client disconnected")
         except Exception as e:
             logger.error("Completion error: %s", e, exc_info=True)
-            return web.json_response({"error": {"message": "Internal server error", "type": "server_error"}}, status=500)
+            return web.json_response(
+                {"error": {"message": "Internal server error", "type": "server_error"}},
+                status=500,
+            )
 
     async def handle_chat_completions(self, request: web.Request) -> web.Response:
         """POST /v1/chat/completions"""
         if self.async_engine is None:
-            return web.json_response({"error": {"message": "No model loaded", "type": "server_error"}}, status=503)
+            return web.json_response(
+                {"error": {"message": "No model loaded", "type": "server_error"}},
+                status=503,
+            )
         try:
             body = await request.json()
         except Exception:
-            return web.json_response({"error": {"message": "Invalid JSON", "type": "invalid_request_error"}}, status=400)
+            return web.json_response(
+                {"error": {"message": "Invalid JSON", "type": "invalid_request_error"}},
+                status=400,
+            )
 
         messages = body.get("messages")
         if not messages:
-            return web.json_response({"error": {"message": "Missing 'messages'", "type": "invalid_request_error"}}, status=400)
+            return web.json_response(
+                {
+                    "error": {
+                        "message": "Missing 'messages'",
+                        "type": "invalid_request_error",
+                    }
+                },
+                status=400,
+            )
 
         images = self._extract_images_from_messages(messages)
         pixel_values = None
@@ -400,7 +494,13 @@ class CompletionsMixin:
         max_tokens = body.get("max_tokens", 256)
         max_seq_len = self.sync_engine.scheduler.max_seq_len
         context_management = body.get("context_management", "auto")
-        context_enabled = context_management not in (False, None, "disabled", "off", "none")
+        context_enabled = context_management not in (
+            False,
+            None,
+            "disabled",
+            "off",
+            "none",
+        )
         try:
             if context_enabled:
                 context_plan = await self._prepare_chat_context(
@@ -468,7 +568,10 @@ class CompletionsMixin:
 
         error = req.validate(max_seq_len=max_seq_len, prompt_tokens=len(prompt_ids))
         if error:
-            return web.json_response({"error": {"message": error, "type": "invalid_request_error"}}, status=400)
+            return web.json_response(
+                {"error": {"message": error, "type": "invalid_request_error"}},
+                status=400,
+            )
         req._chat_total_max_tokens = req.max_tokens
         if req._chat_response_prefill:
             default_thinking_budget = min(
@@ -511,7 +614,9 @@ class CompletionsMixin:
                 response.content_type = "text/event-stream"
                 response.headers["Cache-Control"] = "no-cache"
                 await response.prepare(request)
-                gen = self._async_chat_stream(req, body.get("tools"), api_key=req_api_key)
+                gen = self._async_chat_stream(
+                    req, body.get("tools"), api_key=req_api_key
+                )
                 try:
                     async for chunk in gen:
                         await response.write(chunk.encode())
@@ -533,8 +638,9 @@ class CompletionsMixin:
                 if response_prefill and not raw_text.startswith(response_prefill):
                     text = response_prefill + raw_text
 
-                if response_prefill and "</think>" not in raw_text:
-                    transition = self._THINK_FINAL_TRANSITION
+                reasoning_contract = self._chat_reasoning_contract(response_prefill)
+                if reasoning_contract and reasoning_contract[0] not in raw_text:
+                    _, transition, closing = reasoning_contract
                     transition_ids = await self._tokenize_async(transition)
                     used = int(
                         result_dict.get("usage", {}).get(
@@ -577,8 +683,8 @@ class CompletionsMixin:
                                 final_text = follow_dict["choices"][0]["text"]
 
                     text += transition + final_text
-                    if "</final>" not in final_text:
-                        text += "\n</final>"
+                    if closing not in final_text:
+                        text += closing
 
                     if follow_dict is not None:
                         first_usage = result_dict.get("usage", {})
@@ -598,14 +704,26 @@ class CompletionsMixin:
                 tools = body.get("tools")
                 if tools:
                     from tr_hash_i64.core.tool_parser import ToolCallParser
+
                     tool_calls = ToolCallParser(tools).parse(text)
                     if tool_calls:
                         message["tool_calls"] = [
-                            {"id": tc.id, "type": tc.type, "function": {"name": tc.function_name, "arguments": tc.function_arguments}}
+                            {
+                                "id": tc.id,
+                                "type": tc.type,
+                                "function": {
+                                    "name": tc.function_name,
+                                    "arguments": tc.function_arguments,
+                                },
+                            }
                             for tc in tool_calls
                         ]
                         finish_reason = "tool_calls"
-                chat_choice = {"message": message, "index": 0, "finish_reason": finish_reason}
+                chat_choice = {
+                    "message": message,
+                    "index": 0,
+                    "finish_reason": finish_reason,
+                }
                 if "logprobs" in result_dict["choices"][0]:
                     chat_choice["logprobs"] = result_dict["choices"][0]["logprobs"]
                 result_dict["choices"][0] = chat_choice
@@ -615,4 +733,7 @@ class CompletionsMixin:
             return web.Response(status=499, text="Client disconnected")
         except Exception as e:
             logger.error("Chat completion error: %s", e, exc_info=True)
-            return web.json_response({"error": {"message": "Internal server error", "type": "server_error"}}, status=500)
+            return web.json_response(
+                {"error": {"message": "Internal server error", "type": "server_error"}},
+                status=500,
+            )

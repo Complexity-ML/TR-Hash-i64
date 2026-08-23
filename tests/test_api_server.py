@@ -24,14 +24,13 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from tr_hash_i64.engine.i64_engine import I64Engine
 from tr_hash_i64.api.server import I64Server, CompletionRequest, CompletionResponse
 from tr_hash_i64.api._completions import CompletionsMixin
 from tr_hash_i64.api.middleware import TokenBucketRateLimiter
-from tr_hash_i64.api.tracking import UsageTracker, RequestCache, LatencyTracker, PriorityManager
+from tr_hash_i64.api.tracking import UsageTracker, RequestCache, LatencyTracker
 
 
 @pytest.fixture
@@ -146,13 +145,10 @@ def test_chat_decoder_preserves_only_native_reasoning_markers():
         tokenizer=_NativeEnvelopeTokenizer(),
     )
 
-    decoded = server._detokenize_chat(
-        [32_000, 10, 32_001, 32_002, 11, 32_003]
-    )
+    decoded = server._detokenize_chat([32_000, 10, 32_001, 32_002, 11, 32_003])
 
     assert decoded == (
-        "<|think_start|>reason<|think_end|>"
-        "<|final_start|>answer<|final_end|>"
+        "<|think_start|>reason<|think_end|><|final_start|>answer<|final_end|>"
     )
     assert server._chat_stop_token_ids() == [32_003]
 
@@ -172,9 +168,38 @@ def test_chat_stream_decoder_emits_native_markers_atomically():
     assert emitted == "<|think_start|>reason"
 
 
+def test_chat_response_prefill_supports_seeded_native_thinking():
+    prompt = (
+        "User:\nExplain the result.\n\nAssistant:\n"
+        "<|think_start|>Let us reason briefly step by step.\n"
+    )
+
+    assert CompletionsMixin._chat_response_prefill(prompt) == (
+        "<|think_start|>Let us reason briefly step by step.\n"
+    )
+    assert CompletionsMixin._chat_reasoning_contract(
+        CompletionsMixin._chat_response_prefill(prompt)
+    ) == (
+        "<|think_end|>",
+        "<|think_end|><|final_start|>",
+        "<|final_end|>",
+    )
+
+
+def test_chat_response_prefill_ignores_completed_native_envelope():
+    prompt = (
+        "Assistant:\n<|think_start|>reason<|think_end|>"
+        "<|final_start|>answer<|final_end|>\n"
+        "User:\nNext question.\n\nAssistant:\n"
+    )
+
+    assert CompletionsMixin._chat_response_prefill(prompt) == ""
+
+
 # =====================================================================
 # Health & Models
 # =====================================================================
+
 
 @pytest.mark.asyncio
 async def test_health(client):
@@ -337,12 +362,16 @@ async def test_expert_stats_report_real_top2_routes(client, server):
 # Completions
 # =====================================================================
 
+
 @pytest.mark.asyncio
 async def test_completions(client):
-    resp = await client.post("/v1/completions", json={
-        "prompt": "hello world",
-        "max_tokens": 5,
-    })
+    resp = await client.post(
+        "/v1/completions",
+        json={
+            "prompt": "hello world",
+            "max_tokens": 5,
+        },
+    )
     assert resp.status == 200
     data = await resp.json()
     assert "choices" in data
@@ -356,9 +385,12 @@ async def test_completions(client):
 @pytest.mark.asyncio
 async def test_completions_missing_prompt(client):
     """Should return 400 for missing prompt."""
-    resp = await client.post("/v1/completions", json={
-        "max_tokens": 5,
-    })
+    resp = await client.post(
+        "/v1/completions",
+        json={
+            "max_tokens": 5,
+        },
+    )
     assert resp.status == 400
     data = await resp.json()
     assert "error" in data
@@ -368,18 +400,24 @@ async def test_completions_missing_prompt(client):
 @pytest.mark.asyncio
 async def test_completions_empty_prompt(client):
     """Should return 400 for empty prompt."""
-    resp = await client.post("/v1/completions", json={
-        "prompt": "",
-        "max_tokens": 5,
-    })
+    resp = await client.post(
+        "/v1/completions",
+        json={
+            "prompt": "",
+            "max_tokens": 5,
+        },
+    )
     assert resp.status == 400
 
 
 @pytest.mark.asyncio
 async def test_completions_invalid_json(client):
     """Should return 400 for invalid JSON."""
-    resp = await client.post("/v1/completions", data=b"not json",
-                             headers={"Content-Type": "application/json"})
+    resp = await client.post(
+        "/v1/completions",
+        data=b"not json",
+        headers={"Content-Type": "application/json"},
+    )
     assert resp.status == 400
     data = await resp.json()
     assert "error" in data
@@ -388,11 +426,14 @@ async def test_completions_invalid_json(client):
 @pytest.mark.asyncio
 async def test_completions_invalid_temperature(client):
     """Should return 400 for negative temperature."""
-    resp = await client.post("/v1/completions", json={
-        "prompt": "test",
-        "max_tokens": 5,
-        "temperature": -1.0,
-    })
+    resp = await client.post(
+        "/v1/completions",
+        json={
+            "prompt": "test",
+            "max_tokens": 5,
+            "temperature": -1.0,
+        },
+    )
     assert resp.status == 400
     data = await resp.json()
     assert "temperature" in data["error"]["message"]
@@ -401,21 +442,27 @@ async def test_completions_invalid_temperature(client):
 @pytest.mark.asyncio
 async def test_completions_invalid_top_p(client):
     """Should return 400 for top_p > 1."""
-    resp = await client.post("/v1/completions", json={
-        "prompt": "test",
-        "max_tokens": 5,
-        "top_p": 1.5,
-    })
+    resp = await client.post(
+        "/v1/completions",
+        json={
+            "prompt": "test",
+            "max_tokens": 5,
+            "top_p": 1.5,
+        },
+    )
     assert resp.status == 400
 
 
 @pytest.mark.asyncio
 async def test_completions_response_format(client):
     """Response should have proper OpenAI format."""
-    resp = await client.post("/v1/completions", json={
-        "prompt": "hello",
-        "max_tokens": 3,
-    })
+    resp = await client.post(
+        "/v1/completions",
+        json={
+            "prompt": "hello",
+            "max_tokens": 3,
+        },
+    )
     data = await resp.json()
     assert "id" in data
     assert data["id"].startswith("chatcmpl-")
@@ -428,11 +475,14 @@ async def test_completions_response_format(client):
 @pytest.mark.asyncio
 async def test_completions_streaming(client):
     """SSE streaming should return valid event-stream data."""
-    resp = await client.post("/v1/completions", json={
-        "prompt": "hello",
-        "max_tokens": 3,
-        "stream": True,
-    })
+    resp = await client.post(
+        "/v1/completions",
+        json={
+            "prompt": "hello",
+            "max_tokens": 3,
+            "stream": True,
+        },
+    )
     assert resp.status == 200
     assert resp.content_type == "text/event-stream"
     body = await resp.read()
@@ -446,10 +496,13 @@ async def test_completions_streaming(client):
 @pytest.mark.asyncio
 async def test_completions_reject_exact_context_overflow(client):
     """The prompt and requested output must jointly fit the model window."""
-    resp = await client.post("/v1/completions", json={
-        "prompt": "x" * 2040,
-        "max_tokens": 16,
-    })
+    resp = await client.post(
+        "/v1/completions",
+        json={
+            "prompt": "x" * 2040,
+            "max_tokens": 16,
+        },
+    )
     assert resp.status == 400
     data = await resp.json()
     assert "prompt_tokens (2040) + max_tokens (16)" in data["error"]["message"]
@@ -459,14 +512,18 @@ async def test_completions_reject_exact_context_overflow(client):
 # Chat Completions
 # =====================================================================
 
+
 @pytest.mark.asyncio
 async def test_chat_completions(client):
-    resp = await client.post("/v1/chat/completions", json={
-        "messages": [
-            {"role": "user", "content": "Hi there"},
-        ],
-        "max_tokens": 3,
-    })
+    resp = await client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [
+                {"role": "user", "content": "Hi there"},
+            ],
+            "max_tokens": 3,
+        },
+    )
     assert resp.status == 200
     data = await resp.json()
     assert data["object"] == "chat.completion"
@@ -476,14 +533,17 @@ async def test_chat_completions(client):
 
 @pytest.mark.asyncio
 async def test_chat_completions_preserve_raw_message_boundaries(client):
-    resp = await client.post("/v1/chat/completions", json={
-        "messages": [
-            {"role": "user", "content": "First turn"},
-            {"role": "assistant", "content": "First answer"},
-            {"role": "user", "content": "Second turn"},
-        ],
-        "max_tokens": 3,
-    })
+    resp = await client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [
+                {"role": "user", "content": "First turn"},
+                {"role": "assistant", "content": "First answer"},
+                {"role": "user", "content": "Second turn"},
+            ],
+            "max_tokens": 3,
+        },
+    )
 
     assert resp.status == 200
     data = await resp.json()
@@ -493,17 +553,23 @@ async def test_chat_completions_preserve_raw_message_boundaries(client):
 
 @pytest.mark.asyncio
 async def test_chat_completions_do_not_replay_assistant_thoughts(client):
-    resp = await client.post("/v1/chat/completions", json={
-        "messages": [
-            {"role": "user", "content": "First question"},
-            {
-                "role": "assistant",
-                "content": "<think>private stale chain</think><final>First answer</final>",
-            },
-            {"role": "user", "content": "Second question"},
-        ],
-        "max_tokens": 3,
-    })
+    resp = await client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [
+                {"role": "user", "content": "First question"},
+                {
+                    "role": "assistant",
+                    "content": (
+                        "<|think_start|>private stale chain<|think_end|>"
+                        "<|final_start|>First answer<|final_end|>"
+                    ),
+                },
+                {"role": "user", "content": "Second question"},
+            ],
+            "max_tokens": 3,
+        },
+    )
 
     assert resp.status == 200
     data = await resp.json()
@@ -513,14 +579,20 @@ async def test_chat_completions_do_not_replay_assistant_thoughts(client):
 
 @pytest.mark.asyncio
 async def test_chat_completions_drop_truncated_assistant_thought(client):
-    resp = await client.post("/v1/chat/completions", json={
-        "messages": [
-            {"role": "user", "content": "First question"},
-            {"role": "assistant", "content": "<think>unfinished stale chain"},
-            {"role": "user", "content": "Second question"},
-        ],
-        "max_tokens": 3,
-    })
+    resp = await client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [
+                {"role": "user", "content": "First question"},
+                {
+                    "role": "assistant",
+                    "content": "<|think_start|>unfinished stale chain",
+                },
+                {"role": "user", "content": "Second question"},
+            ],
+            "max_tokens": 3,
+        },
+    )
 
     assert resp.status == 200
     data = await resp.json()
@@ -531,9 +603,12 @@ async def test_chat_completions_drop_truncated_assistant_thought(client):
 @pytest.mark.asyncio
 async def test_chat_completions_missing_messages(client):
     """Should return 400 for missing messages."""
-    resp = await client.post("/v1/chat/completions", json={
-        "max_tokens": 3,
-    })
+    resp = await client.post(
+        "/v1/chat/completions",
+        json={
+            "max_tokens": 3,
+        },
+    )
     assert resp.status == 400
     data = await resp.json()
     assert "messages" in data["error"]["message"].lower()
@@ -543,15 +618,20 @@ async def test_chat_completions_missing_messages(client):
 async def test_chat_completions_roll_old_context(client):
     messages = [{"role": "system", "content": "Preserve this instruction."}]
     for index in range(10):
-        messages.extend([
-            {"role": "user", "content": f"Question {index}: " + ("x" * 180)},
-            {"role": "assistant", "content": f"Answer {index}: " + ("y" * 180)},
-        ])
+        messages.extend(
+            [
+                {"role": "user", "content": f"Question {index}: " + ("x" * 180)},
+                {"role": "assistant", "content": f"Answer {index}: " + ("y" * 180)},
+            ]
+        )
 
-    resp = await client.post("/v1/chat/completions", json={
-        "messages": messages,
-        "max_tokens": 64,
-    })
+    resp = await client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": messages,
+            "max_tokens": 64,
+        },
+    )
 
     assert resp.status == 200
     data = await resp.json()
@@ -565,11 +645,14 @@ async def test_chat_completions_roll_old_context(client):
 
 @pytest.mark.asyncio
 async def test_chat_context_management_can_be_disabled(client):
-    resp = await client.post("/v1/chat/completions", json={
-        "messages": [{"role": "user", "content": "x" * 2040}],
-        "max_tokens": 16,
-        "context_management": False,
-    })
+    resp = await client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "x" * 2040}],
+            "max_tokens": 16,
+            "context_management": False,
+        },
+    )
 
     assert resp.status == 400
     data = await resp.json()
@@ -578,11 +661,14 @@ async def test_chat_context_management_can_be_disabled(client):
 
 @pytest.mark.asyncio
 async def test_chat_stream_exposes_context_metrics(client):
-    resp = await client.post("/v1/chat/completions", json={
-        "messages": [{"role": "user", "content": "Hello"}],
-        "max_tokens": 2,
-        "stream": True,
-    })
+    resp = await client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 2,
+            "stream": True,
+        },
+    )
 
     assert resp.status == 200
     text = (await resp.read()).decode("utf-8")
@@ -597,44 +683,50 @@ async def test_chat_stream_exposes_context_metrics(client):
 
 
 @pytest.mark.asyncio
-async def test_chat_response_restores_think_generation_prefill(client, server):
+async def test_chat_response_restores_seeded_native_thinking_prefill(client, server):
     server.chat_template = (
         "{% for message in messages %}"
         "{{ message['role'] }}: {{ message['content'] }}\\n"
         "{% endfor %}"
         "{% if add_generation_prompt %}"
-        "{{ 'Assistant:\\n<think>\\n' }}"
+        "{{ 'Assistant:\\n<|think_start|>Let us reason briefly.\\n' }}"
         "{% endif %}"
     )
 
-    resp = await client.post("/v1/chat/completions", json={
-        "messages": [{"role": "user", "content": "Hello"}],
-        "max_tokens": 2,
-    })
+    resp = await client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 2,
+        },
+    )
 
     assert resp.status == 200
     content = (await resp.json())["choices"][0]["message"]["content"]
-    assert content.startswith("<think>\n")
-    assert "</think>\n<final>\n" in content
-    assert content.endswith("</final>")
+    assert content.startswith("<|think_start|>Let us reason briefly.\n")
+    assert "<|think_end|><|final_start|>" in content
+    assert content.endswith("<|final_end|>")
 
 
 @pytest.mark.asyncio
-async def test_chat_stream_starts_with_think_generation_prefill(client, server):
+async def test_chat_stream_supports_seeded_native_thinking_prefill(client, server):
     server.chat_template = (
         "{% for message in messages %}"
         "{{ message['role'] }}: {{ message['content'] }}\\n"
         "{% endfor %}"
         "{% if add_generation_prompt %}"
-        "{{ 'Assistant:\\n<think>\\n' }}"
+        "{{ 'Assistant:\\n<|think_start|>Let us reason briefly.\\n' }}"
         "{% endif %}"
     )
 
-    resp = await client.post("/v1/chat/completions", json={
-        "messages": [{"role": "user", "content": "Hello"}],
-        "max_tokens": 2,
-        "stream": True,
-    })
+    resp = await client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 2,
+            "stream": True,
+        },
+    )
 
     assert resp.status == 200
     events = [
@@ -642,13 +734,14 @@ async def test_chat_stream_starts_with_think_generation_prefill(client, server):
         for line in (await resp.read()).decode("utf-8").splitlines()
         if line.startswith("data: {")
     ]
-    assert events[0]["choices"][0]["delta"]["content"] == "<think>\n"
-    streamed = "".join(
-        event["choices"][0]["delta"].get("content", "")
-        for event in events
+    assert events[0]["choices"][0]["delta"]["content"] == (
+        "<|think_start|>Let us reason briefly.\n"
     )
-    assert "</think>\n<final>\n" in streamed
-    assert streamed.endswith("</final>")
+    streamed = "".join(
+        event["choices"][0]["delta"].get("content", "") for event in events
+    )
+    assert "<|think_end|><|final_start|>" in streamed
+    assert streamed.endswith("<|final_end|>")
 
 
 @pytest.mark.asyncio
@@ -658,15 +751,18 @@ async def test_chat_rejects_invalid_thinking_budget(client, server):
         "{{ message['role'] }}: {{ message['content'] }}\\n"
         "{% endfor %}"
         "{% if add_generation_prompt %}"
-        "{{ 'Assistant:\\n<think>\\n' }}"
+        "{{ 'Assistant:\\n<|think_start|>' }}"
         "{% endif %}"
     )
 
-    resp = await client.post("/v1/chat/completions", json={
-        "messages": [{"role": "user", "content": "Hello"}],
-        "max_tokens": 64,
-        "thinking_budget": 0,
-    })
+    resp = await client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 64,
+            "thinking_budget": 0,
+        },
+    )
 
     assert resp.status == 400
     assert "thinking_budget" in (await resp.json())["error"]["message"]
@@ -674,10 +770,13 @@ async def test_chat_rejects_invalid_thinking_budget(client, server):
 
 @pytest.mark.asyncio
 async def test_metrics_expose_context_aggregation(client):
-    await client.post("/v1/chat/completions", json={
-        "messages": [{"role": "user", "content": "Hello"}],
-        "max_tokens": 2,
-    })
+    await client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 2,
+        },
+    )
 
     resp = await client.get("/v1/metrics")
     assert resp.status == 200
@@ -689,6 +788,7 @@ async def test_metrics_expose_context_aggregation(client):
 # =====================================================================
 # Concurrent Requests
 # =====================================================================
+
 
 @pytest.mark.asyncio
 async def test_concurrent_requests(client):
@@ -724,13 +824,17 @@ async def test_concurrent_unique_ids(client):
 # Authentication
 # =====================================================================
 
+
 @pytest.mark.asyncio
 async def test_auth_no_key_rejected(auth_client):
     """Requests without API key should be rejected."""
-    resp = await auth_client.post("/v1/completions", json={
-        "prompt": "test",
-        "max_tokens": 3,
-    })
+    resp = await auth_client.post(
+        "/v1/completions",
+        json={
+            "prompt": "test",
+            "max_tokens": 3,
+        },
+    )
     assert resp.status == 401
     data = await resp.json()
     assert data["error"]["type"] == "authentication_error"
@@ -739,20 +843,28 @@ async def test_auth_no_key_rejected(auth_client):
 @pytest.mark.asyncio
 async def test_auth_wrong_key_rejected(auth_client):
     """Requests with wrong API key should be rejected."""
-    resp = await auth_client.post("/v1/completions", json={
-        "prompt": "test",
-        "max_tokens": 3,
-    }, headers={"Authorization": "Bearer wrong-key"})
+    resp = await auth_client.post(
+        "/v1/completions",
+        json={
+            "prompt": "test",
+            "max_tokens": 3,
+        },
+        headers={"Authorization": "Bearer wrong-key"},
+    )
     assert resp.status == 401
 
 
 @pytest.mark.asyncio
 async def test_auth_correct_key_accepted(auth_client):
     """Requests with correct API key should succeed."""
-    resp = await auth_client.post("/v1/completions", json={
-        "prompt": "test",
-        "max_tokens": 3,
-    }, headers={"Authorization": "Bearer test-secret-key-12345"})
+    resp = await auth_client.post(
+        "/v1/completions",
+        json={
+            "prompt": "test",
+            "max_tokens": 3,
+        },
+        headers={"Authorization": "Bearer test-secret-key-12345"},
+    )
     assert resp.status == 200
 
 
@@ -767,28 +879,38 @@ async def test_auth_health_no_key_needed(auth_client):
 # Rate Limiting
 # =====================================================================
 
+
 @pytest.mark.asyncio
 async def test_rate_limiting(rate_client):
     """Should reject requests exceeding rate limit."""
     # First request should succeed
-    resp1 = await rate_client.post("/v1/completions", json={
-        "prompt": "test 1",
-        "max_tokens": 2,
-    })
+    resp1 = await rate_client.post(
+        "/v1/completions",
+        json={
+            "prompt": "test 1",
+            "max_tokens": 2,
+        },
+    )
     assert resp1.status == 200
 
     # Second request should succeed (capacity = 2)
-    resp2 = await rate_client.post("/v1/completions", json={
-        "prompt": "test 2",
-        "max_tokens": 2,
-    })
+    resp2 = await rate_client.post(
+        "/v1/completions",
+        json={
+            "prompt": "test 2",
+            "max_tokens": 2,
+        },
+    )
     assert resp2.status == 200
 
     # Third request should be rate limited
-    resp3 = await rate_client.post("/v1/completions", json={
-        "prompt": "test 3",
-        "max_tokens": 2,
-    })
+    resp3 = await rate_client.post(
+        "/v1/completions",
+        json={
+            "prompt": "test 3",
+            "max_tokens": 2,
+        },
+    )
     assert resp3.status == 429
     data = await resp3.json()
     assert data["error"]["type"] == "rate_limit_error"
@@ -801,18 +923,27 @@ async def test_rate_limiting_does_not_charge_read_only_telemetry(rate_client):
         response = await rate_client.get("/v1/models")
         assert response.status == 200
 
-    first = await rate_client.post("/v1/completions", json={
-        "prompt": "first generation",
-        "max_tokens": 2,
-    })
-    second = await rate_client.post("/v1/completions", json={
-        "prompt": "second generation",
-        "max_tokens": 2,
-    })
-    third = await rate_client.post("/v1/completions", json={
-        "prompt": "third generation",
-        "max_tokens": 2,
-    })
+    first = await rate_client.post(
+        "/v1/completions",
+        json={
+            "prompt": "first generation",
+            "max_tokens": 2,
+        },
+    )
+    second = await rate_client.post(
+        "/v1/completions",
+        json={
+            "prompt": "second generation",
+            "max_tokens": 2,
+        },
+    )
+    third = await rate_client.post(
+        "/v1/completions",
+        json={
+            "prompt": "third generation",
+            "max_tokens": 2,
+        },
+    )
 
     assert first.status == 200
     assert second.status == 200
@@ -823,15 +954,19 @@ async def test_rate_limiting_does_not_charge_read_only_telemetry(rate_client):
 # Batch Endpoint
 # =====================================================================
 
+
 @pytest.mark.asyncio
 async def test_batch_completions(client):
     """Batch endpoint should process multiple prompts."""
-    resp = await client.post("/v1/batch", json={
-        "requests": [
-            {"prompt": "hello", "max_tokens": 3},
-            {"prompt": "world", "max_tokens": 3},
-        ],
-    })
+    resp = await client.post(
+        "/v1/batch",
+        json={
+            "requests": [
+                {"prompt": "hello", "max_tokens": 3},
+                {"prompt": "world", "max_tokens": 3},
+            ],
+        },
+    )
     assert resp.status == 200
     data = await resp.json()
     assert "responses" in data
@@ -843,18 +978,22 @@ async def test_batch_completions(client):
 @pytest.mark.asyncio
 async def test_batch_validation(client):
     """Batch should validate individual requests."""
-    resp = await client.post("/v1/batch", json={
-        "requests": [
-            {"prompt": "ok", "max_tokens": 3},
-            {"prompt": "", "max_tokens": 3},  # Invalid: empty prompt
-        ],
-    })
+    resp = await client.post(
+        "/v1/batch",
+        json={
+            "requests": [
+                {"prompt": "ok", "max_tokens": 3},
+                {"prompt": "", "max_tokens": 3},  # Invalid: empty prompt
+            ],
+        },
+    )
     assert resp.status == 400
 
 
 # =====================================================================
 # Unit Tests for Utility Classes
 # =====================================================================
+
 
 class TestCompletionRequest:
     def test_validate_valid(self):
@@ -965,13 +1104,19 @@ class TestRequestCache:
     def test_cache_deterministic(self):
         """Should cache requests with temperature=0."""
         cache = RequestCache()
-        cache.put("hello", 10, {"result": "cached"}, temperature=0.0, top_k=50, top_p=0.9)
-        assert cache.get("hello", 10, temperature=0.0, top_k=50, top_p=0.9) == {"result": "cached"}
+        cache.put(
+            "hello", 10, {"result": "cached"}, temperature=0.0, top_k=50, top_p=0.9
+        )
+        assert cache.get("hello", 10, temperature=0.0, top_k=50, top_p=0.9) == {
+            "result": "cached"
+        }
 
     def test_no_cache_nondeterministic(self):
         """Should NOT cache requests with temperature > 0."""
         cache = RequestCache()
-        cache.put("hello", 10, {"result": "cached"}, temperature=0.8, top_k=50, top_p=0.9)
+        cache.put(
+            "hello", 10, {"result": "cached"}, temperature=0.8, top_k=50, top_p=0.9
+        )
         assert cache.get("hello", 10, temperature=0.8, top_k=50, top_p=0.9) is None
 
     def test_eviction_order(self):
@@ -979,7 +1124,9 @@ class TestRequestCache:
         cache = RequestCache(max_size=2)
         cache.put("a", 10, {"r": "a"}, temperature=0.0, top_k=50, top_p=0.9)
         cache.put("b", 10, {"r": "b"}, temperature=0.0, top_k=50, top_p=0.9)
-        cache.put("c", 10, {"r": "c"}, temperature=0.0, top_k=50, top_p=0.9)  # Should evict "a"
+        cache.put(
+            "c", 10, {"r": "c"}, temperature=0.0, top_k=50, top_p=0.9
+        )  # Should evict "a"
         assert cache.get("a", 10, temperature=0.0, top_k=50, top_p=0.9) is None
         assert cache.get("b", 10, temperature=0.0, top_k=50, top_p=0.9) is not None
 
