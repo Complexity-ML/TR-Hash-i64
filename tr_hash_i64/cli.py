@@ -8,7 +8,8 @@ Usage:
     tr-hash-i64 check <model>
     tr-hash-i64 estimate <model> [--dtype float16] [--max-batch-size 32]
     tr-hash-i64 service install <name> <model> [--port 8000] [--tp 1]
-    tr-hash-i64 service status|start|stop|restart|logs|remove <name>
+    tr-hash-i64 service status|doctor|autotune|upgrade <name>
+    tr-hash-i64 service start|stop|restart|logs|remove <name>
 
 Multi-GPU:
     tr-hash-i64 serve pacific-prime-chat --tp 4
@@ -547,7 +548,15 @@ def cmd_service_install(args):
     """Install one complete inference process group under Supervisor."""
     from pathlib import Path
     from tr_hash_i64.service import ServiceSpec, load_protected_secret
+    from tr_hash_i64.service_ops import resolve_profile
 
+    manager = _service_manager(args)
+    profile = resolve_profile(
+        args.profile,
+        max_batch_size=args.max_batch_size,
+        chunk_size=args.chunk_size,
+        max_kv_blocks=args.max_kv_blocks,
+    )
     directory = Path(args.directory).resolve()
     log_path = (
         Path(args.log).resolve()
@@ -573,11 +582,11 @@ def cmd_service_install(args):
         "--quantization",
         args.quantization,
         "--max-batch-size",
-        str(args.max_batch_size),
+        str(profile.max_batch_size),
         "--chunk-size",
-        str(args.chunk_size),
+        str(profile.chunk_size),
         "--max-kv-blocks",
-        str(args.max_kv_blocks),
+        str(profile.max_kv_blocks),
         "--rate-limit",
         str(args.rate_limit),
         "--max-pending",
@@ -605,6 +614,25 @@ def cmd_service_install(args):
         if args.tp * args.pp > len(visible):
             raise SystemExit("TP x PP cannot exceed the number of --devices")
 
+    watchdog_command = None
+    if not args.no_watchdog:
+        watchdog_command = (
+            sys.executable,
+            "-m",
+            "tr_hash_i64.cli",
+            "service",
+            "watchdog",
+            args.name,
+            "--config-dir",
+            str(manager.config_dir),
+            "--interval",
+            str(args.watchdog_interval),
+            "--failures",
+            str(args.watchdog_failures),
+            "--grace",
+            str(args.watchdog_grace),
+        )
+
     spec = ServiceSpec(
         name=args.name,
         command=tuple(command),
@@ -613,11 +641,21 @@ def cmd_service_install(args):
         host=args.host,
         port=args.port,
         devices=args.devices,
+        model=args.model,
+        profile=profile.name,
+        checkpoint=str(Path(args.checkpoint).resolve()) if args.checkpoint else "",
+        max_batch_size=profile.max_batch_size,
+        chunk_size=profile.chunk_size,
+        max_kv_blocks=profile.max_kv_blocks,
+        watchdog_command=watchdog_command,
+        watchdog_interval=args.watchdog_interval,
+        watchdog_failures=args.watchdog_failures,
+        watchdog_grace=args.watchdog_grace,
         startsecs=args.startsecs,
         startretries=args.startretries,
         stopwaitsecs=args.stopwaitsecs,
     )
-    path = _service_manager(args).install(spec)
+    path = manager.install(spec)
     print(f"Installed {spec.program_name}")
     print(f"Configuration: {path}")
     print(f"Logs: {spec.log_path}")
@@ -628,7 +666,25 @@ def cmd_service_list(args):
 
 
 def cmd_service_status(args):
-    _print_service_status(_service_manager(args).status(args.name))
+    import os
+    from tr_hash_i64.service_ops import status_snapshot
+
+    snapshot = status_snapshot(_service_manager(args), args.name)
+    use_color = sys.stdout.isatty() and "NO_COLOR" not in os.environ
+    state_color = _SERVICE_COLORS.get(snapshot.state, "") if use_color else ""
+    ready_color = "\033[1;32m" if snapshot.ready and use_color else (
+        "\033[1;31m" if use_color else ""
+    )
+    reset = "\033[0m" if use_color else ""
+    readiness_label = "READY" if snapshot.ready else "NOT_READY"
+    print(
+        f"{snapshot.name}  {state_color}{snapshot.state}{reset}  "
+        f"{ready_color}{readiness_label}{reset}  profile={snapshot.profile}  "
+        f"GPU={snapshot.devices}  VRAM={snapshot.vram}  "
+        f"batch={snapshot.batch_size}  {snapshot.throughput}"
+    )
+    if snapshot.details:
+        print(f"  {snapshot.details}")
 
 
 def cmd_service_lifecycle(args):
@@ -652,6 +708,105 @@ def cmd_service_logs(args):
 def cmd_service_remove(args):
     _service_manager(args).remove(args.name, missing_ok=args.missing_ok)
     print(f"Removed tr_hash_i64_{args.name}")
+
+
+def cmd_service_doctor(args):
+    import os
+    from tr_hash_i64.service_ops import run_doctor
+
+    use_color = sys.stdout.isatty() and "NO_COLOR" not in os.environ
+    colors = {"PASS": "\033[1;32m", "WARN": "\033[1;33m", "FAIL": "\033[1;31m"}
+    checks = run_doctor(_service_manager(args), args.name)
+    for check in checks:
+        color = colors.get(check.status, "") if use_color else ""
+        reset = "\033[0m" if color else ""
+        print(f"{color}{check.status:<4}{reset}  {check.name:<14} {check.detail}")
+    if any(check.status == "FAIL" for check in checks):
+        raise SystemExit(1)
+
+
+def cmd_service_watchdog(args):
+    from tr_hash_i64.service_ops import run_watchdog
+
+    run_watchdog(
+        _service_manager(args),
+        args.name,
+        interval=args.interval,
+        failures=args.failures,
+        grace=args.grace,
+    )
+
+
+def cmd_service_autotune(args):
+    from tr_hash_i64.service_ops import (
+        AUTOTUNE_CANDIDATES,
+        ServiceAutotuner,
+        benchmark_endpoint,
+        wait_until_ready,
+    )
+
+    manager = _service_manager(args)
+    tuner = ServiceAutotuner(
+        manager,
+        args.name,
+        ready_waiter=lambda current, service: wait_until_ready(
+            current, service, timeout=args.ready_timeout
+        ),
+        benchmark=lambda current, service: benchmark_endpoint(
+            current,
+            service,
+            requests=args.requests,
+            concurrency=args.concurrency,
+            max_tokens=args.max_tokens,
+        ),
+    )
+    best, results = tuner.run(AUTOTUNE_CANDIDATES[args.profile])
+    for result in results:
+        candidate = result.candidate
+        settings = (
+            f"batch={candidate.max_batch_size} chunk={candidate.chunk_size} "
+            f"kv={candidate.max_kv_blocks}"
+        )
+        if result.status == "ok":
+            print(f"OK        {settings}  {result.tokens_per_second:.2f} tok/s")
+        else:
+            print(f"REJECTED  {settings}  {result.detail}")
+    print(
+        "Selected: "
+        f"batch={best.candidate.max_batch_size} chunk={best.candidate.chunk_size} "
+        f"kv={best.candidate.max_kv_blocks} ({best.tokens_per_second:.2f} tok/s)"
+    )
+
+
+def cmd_service_upgrade(args):
+    from pathlib import Path
+    from tr_hash_i64.service_ops import ServiceUpgrader, wait_until_ready
+
+    manager = _service_manager(args)
+    upgrader = ServiceUpgrader(
+        manager,
+        args.name,
+        ready_waiter=lambda current, service: wait_until_ready(
+            current, service, timeout=args.ready_timeout
+        ),
+    )
+    sha = upgrader.run(
+        source=args.source,
+        ref=args.ref,
+        release_root=Path(args.release_root),
+    )
+    print(f"Upgraded {args.name} to {sha}")
+
+
+def cmd_service_profiles(_args):
+    from tr_hash_i64.service_ops import PROFILES
+
+    for profile in PROFILES.values():
+        print(
+            f"{profile.name:<11} batch={profile.max_batch_size:<3} "
+            f"chunk={profile.chunk_size:<4} kv={profile.max_kv_blocks:<4} "
+            f"{profile.description}"
+        )
 
 
 def main():
@@ -812,12 +967,15 @@ def main():
                            choices=["int8", "int4", "awq", "gptq", "none"])
     p_install.add_argument("--checkpoint", default=None)
     p_install.add_argument("--context-compact-tokens", type=int, default=None)
-    p_install.add_argument("--max-batch-size", type=int, default=32,
-                           help="Maximum continuous-batching size")
-    p_install.add_argument("--chunk-size", type=int, default=512,
-                           help="Chunked-prefill token budget")
-    p_install.add_argument("--max-kv-blocks", type=int, default=0,
-                           help="KV block budget; 0 selects the engine default")
+    p_install.add_argument("--profile", default="balanced",
+                           choices=["latency", "balanced", "throughput"],
+                           help="Performance profile (default: balanced)")
+    p_install.add_argument("--max-batch-size", type=int, default=None,
+                           help="Override the profile's continuous-batching size")
+    p_install.add_argument("--chunk-size", type=int, default=None,
+                           help="Override the profile's prefill token budget")
+    p_install.add_argument("--max-kv-blocks", type=int, default=None,
+                           help="Override the profile's KV block budget")
     p_install.add_argument("--rate-limit", type=int, default=0,
                            help="Maximum requests per minute per IP; 0 is unlimited")
     p_install.add_argument("--max-pending", type=int, default=0,
@@ -830,12 +988,20 @@ def main():
     p_install.add_argument("--startsecs", type=int, default=10)
     p_install.add_argument("--startretries", type=int, default=3)
     p_install.add_argument("--stopwaitsecs", type=int, default=60)
+    p_install.add_argument("--no-watchdog", action="store_true",
+                           help="Disable the readiness watchdog")
+    p_install.add_argument("--watchdog-interval", type=float, default=10.0)
+    p_install.add_argument("--watchdog-failures", type=int, default=3)
+    p_install.add_argument("--watchdog-grace", type=float, default=120.0)
     add_manager_option(p_install)
     p_install.set_defaults(func=cmd_service_install)
 
     p_service_list = service_sub.add_parser("list", help="List managed servers")
     add_manager_option(p_service_list)
     p_service_list.set_defaults(func=cmd_service_list)
+
+    p_profiles = service_sub.add_parser("profiles", help="Show performance profiles")
+    p_profiles.set_defaults(func=cmd_service_profiles)
 
     for action in ("status", "start", "stop", "restart"):
         action_parser = service_sub.add_parser(action, help=f"{action.capitalize()} a server")
@@ -851,6 +1017,49 @@ def main():
     p_logs.add_argument("--follow", "-f", action="store_true")
     add_manager_option(p_logs)
     p_logs.set_defaults(func=cmd_service_logs)
+
+    p_doctor = service_sub.add_parser("doctor", help="Audit a service and its host")
+    p_doctor.add_argument("name")
+    add_manager_option(p_doctor)
+    p_doctor.set_defaults(func=cmd_service_doctor)
+
+    p_watchdog = service_sub.add_parser(
+        "watchdog", help="Run the internal readiness watchdog"
+    )
+    p_watchdog.add_argument("name")
+    p_watchdog.add_argument("--interval", type=float, default=10.0)
+    p_watchdog.add_argument("--failures", type=int, default=3)
+    p_watchdog.add_argument("--grace", type=float, default=120.0)
+    add_manager_option(p_watchdog)
+    p_watchdog.set_defaults(func=cmd_service_watchdog)
+
+    p_autotune = service_sub.add_parser(
+        "autotune", help="Benchmark safe candidates and retain the fastest"
+    )
+    p_autotune.add_argument("name")
+    p_autotune.add_argument("--profile", default="balanced",
+                            choices=["latency", "balanced", "throughput"])
+    p_autotune.add_argument("--requests", type=int, default=8)
+    p_autotune.add_argument("--concurrency", type=int, default=4)
+    p_autotune.add_argument("--max-tokens", type=int, default=32)
+    p_autotune.add_argument("--ready-timeout", type=float, default=180.0)
+    add_manager_option(p_autotune)
+    p_autotune.set_defaults(func=cmd_service_autotune)
+
+    p_upgrade = service_sub.add_parser(
+        "upgrade", help="Install a versioned release and roll back if not ready"
+    )
+    p_upgrade.add_argument("name")
+    p_upgrade.add_argument(
+        "--source", default="https://github.com/Complexity-ML/TR-Hash-i64.git"
+    )
+    p_upgrade.add_argument("--ref", default="main")
+    p_upgrade.add_argument(
+        "--release-root", default="/var/lib/tr-hash-i64/releases"
+    )
+    p_upgrade.add_argument("--ready-timeout", type=float, default=180.0)
+    add_manager_option(p_upgrade)
+    p_upgrade.set_defaults(func=cmd_service_upgrade)
 
     p_remove = service_sub.add_parser("remove", help="Remove a managed server")
     p_remove.add_argument("name")

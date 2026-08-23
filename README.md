@@ -100,21 +100,38 @@ sudo tr-hash-i64 service install public-demo tr-hash-moe-200m \
   --port 7860 \
   --devices 0 \
   --api-key-file /etc/tr-hash-i64/api.key \
-  --max-batch-size 32 \
-  --chunk-size 512 \
-  --max-kv-blocks 512 \
+  --profile balanced \
   --max-pending 128
 ```
 
-Lifecycle and logs are available through one small command surface:
+Three named profiles hide the routine scheduler configuration while still
+allowing explicit overrides:
+
+| Profile | Batch | Prefill chunk | KV blocks | Intended use |
+| --- | ---: | ---: | ---: | --- |
+| `latency` | 8 | 256 | 256 | interactive, low concurrency |
+| `balanced` | 32 | 512 | 512 | safe mixed-traffic default |
+| `throughput` | 64 | 1024 | 1024 | sustained concurrent traffic |
+
+`service profiles` prints these values. `--max-batch-size`, `--chunk-size` and
+`--max-kv-blocks` override one value without creating a new profile.
+
+Lifecycle, readiness, diagnostics and logs use one command surface:
 
 ```bash
 tr-hash-i64 service list
 tr-hash-i64 service status public-demo
+tr-hash-i64 service doctor public-demo
 tr-hash-i64 service restart public-demo
-tr-hash-i64 service logs public-demo --follow
+tr-hash-i64 service logs public-demo -f
 sudo tr-hash-i64 service remove public-demo
 ```
+
+`status` combines Supervisor state with live `/ready` and `/v1/monitor` data,
+including the profile, GPU assignment, VRAM, batch size and observed token
+throughput. `doctor` checks Supervisor, private configuration permissions, the
+executable, checkpoint, secret file, CUDA devices and free VRAM, listening
+port, process state and readiness. It exits non-zero on a failed check.
 
 The generated Supervisor definition uses `autorestart=unexpected`,
 `stopasgroup=true`, `killasgroup=true`, private configuration permissions and
@@ -122,6 +139,38 @@ rotated combined logs. Distributed launch disables rank-local torchrun
 restarts, so Supervisor never leaves a partially replaced TP/PP group behind.
 Use `GET /live` for process liveness and `GET /ready` before admitting traffic;
 readiness is withdrawn while the model is loading or the server is draining.
+
+By default, a separate readiness watchdog starts after a 120-second warm-up.
+Three consecutive `/ready` failures, ten seconds apart, restart the complete
+inference process group. Manual stop/restart and maintenance suspend the
+watchdog first, preventing it from fighting an intentional operation. Use
+`--no-watchdog` only when another orchestrator already owns readiness recovery;
+the interval, threshold and warm-up are separately configurable.
+
+Tune a host after installation with a bounded, rollback-safe benchmark:
+
+```bash
+sudo tr-hash-i64 service autotune public-demo --profile balanced
+```
+
+Each candidate receives a full process-group restart and readiness check. OOM
+or failed candidates are rejected, the fastest successful candidate is kept,
+and the original configuration is restored if every candidate fails. This
+measures the installed model on the actual host; Supervisor itself does not
+make inference kernels faster.
+
+Upgrade into a versioned virtual environment without replacing the working
+release in place:
+
+```bash
+sudo tr-hash-i64 service upgrade public-demo --ref main
+```
+
+The Git ref is resolved to an immutable commit, installed under
+`/var/lib/tr-hash-i64/releases`, then both the server and watchdog commands are
+switched to that release. The command waits for `/ready`; on failure it restores
+the previous private Supervisor configuration, restarts the old release and
+verifies readiness again.
 
 ## OpenAI-compatible API
 

@@ -183,3 +183,7 @@ def test_service_install_persists_performance_settings_without_secret(monkeypatc
     assert "--compile" in command
     assert "do-not-put-this-on-the-command-line" not in command
     assert command[command.index("--api-key-file") + 1] == str(secret)
+    assert captured["spec"].profile == "balanced"
+    assert captured["spec"].max_batch_size == 48
+    assert captured["spec"].watchdog_command is not None
+    assert "watchdog" in captured["spec"].watchdog_command
