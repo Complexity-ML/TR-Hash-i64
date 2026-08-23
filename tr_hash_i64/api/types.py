@@ -51,6 +51,7 @@ class CompletionRequest:
     presence_penalty: float = 0.0
     priority: int = 0
     suppress_first_tokens: Optional[List[int]] = None
+    stop_token_ids: Optional[List[int]] = None
     user: Optional[str] = field(default=None)  # UUID for partition affinity; auto-generated if absent
 
     def validate(
@@ -132,6 +133,7 @@ class CompletionRequest:
             logit_bias=logit_bias,
             frequency_penalty=self.frequency_penalty,
             presence_penalty=self.presence_penalty,
+            stop_token_ids=self.stop_token_ids,
         )
 
 

@@ -588,7 +588,47 @@ class I64Engine:
                         self._request_deadlines[sec_rid] = time.perf_counter() + t
                     return sec_rid
 
-        request_id = self.scheduler.add_request(ids, max_new_tokens, eos_token_id=eos_token_id, cache_namespace=cache_namespace)
+        request_id = self.scheduler.add_request(
+            ids,
+            max_new_tokens,
+            eos_token_id=eos_token_id,
+            stop_token_ids=(
+                sampling_params.stop_token_ids
+                if sampling_params is not None
+                else None
+            ),
+            cache_namespace=cache_namespace,
+        )
+
+        # A request must never enter the scheduler without its engine KV slot.
+        # Under burst concurrency the slot pool can be exhausted even though
+        # the API request was admitted. Roll back scheduler admission
+        # atomically so a slotless request cannot poison the next batch.
+        if self.kv_cache is not None:
+            slot = self._allocate_slot(request_id)
+            if slot < 0:
+                self.scheduler.remove_request(request_id)
+                logger.error("No KV cache slots available for request %d", request_id)
+                raise RuntimeError(f"No KV cache slots available for request {request_id}")
+
+            # Try to reuse prefix from cache.
+            if self.kv_cache.prefix_cache_enabled:
+                reused = self.kv_cache.try_reuse_prefix(
+                    slot,
+                    list(ids),
+                    namespace=cache_namespace,
+                )
+                if reused > 0:
+                    for req in self.scheduler.pending:
+                        if req.request_id == request_id:
+                            req.prefill_progress = reused
+                            req.seq_pos = reused
+                            break
+                    logger.info(
+                        "Prefix cache hit: reused %d tokens for request %d",
+                        reused,
+                        request_id,
+                    )
 
         # Register as merge primary if merging is enabled
         if self._merge_enabled:
@@ -609,33 +649,6 @@ class I64Engine:
         t = timeout_s if timeout_s is not None else self.default_timeout_s
         if t > 0:
             self._request_deadlines[request_id] = time.perf_counter() + t
-
-        # Allocate KV cache slot
-        if self.kv_cache is not None:
-            slot = self._allocate_slot(request_id)
-            if slot < 0:
-                logger.error("No KV cache slots available for request %d", request_id)
-                # Remove the request from the scheduler so it doesn't loop forever
-                self.scheduler.running = [
-                    r for r in self.scheduler.running if r.request_id != request_id
-                ]
-                raise RuntimeError(f"No KV cache slots available for request {request_id}")
-
-            # Try to reuse prefix from cache
-            if self.kv_cache.prefix_cache_enabled:
-                slot = self._request_to_slot.get(request_id)
-                if slot is not None:
-                    req_obj = next((r for r in self.scheduler.pending if r.request_id == request_id), None) or \
-                              next((r for r in self.scheduler.running if r.request_id == request_id), None)
-                    _ns = req_obj.cache_namespace if req_obj is not None else None
-                    reused = self.kv_cache.try_reuse_prefix(slot, list(ids), namespace=_ns)
-                    if reused > 0:
-                        for req in self.scheduler.pending:
-                            if req.request_id == request_id:
-                                req.prefill_progress = reused
-                                req.seq_pos = reused
-                                break
-                        logger.info("Prefix cache hit: reused %d tokens for request %d", reused, request_id)
 
         # Store pixel_values for VLM prefill (consumed and freed after first forward)
         if pixel_values is not None:
@@ -1266,7 +1279,7 @@ class I64Engine:
                 # Determine finish reason
                 finish_reason = getattr(req, "_finish_reason", None)
                 if finish_reason is None:
-                    if req.output_token_ids and req.output_token_ids[-1] == req.eos_token_id:
+                    if req.stopped_on_token:
                         finish_reason = "stop"
                     else:
                         finish_reason = "length"
@@ -1615,7 +1628,7 @@ class AsyncI64Engine:
                         if isinstance(target, asyncio.Future) and not target.done():
                             finish_reason = getattr(req, "_finish_reason", None)
                             if finish_reason is None:
-                                if req.output_token_ids and req.output_token_ids[-1] == req.eos_token_id:
+                                if req.stopped_on_token:
                                     finish_reason = "stop"
                                 else:
                                     finish_reason = "length"
@@ -1646,7 +1659,7 @@ class AsyncI64Engine:
                             # Compute finish_reason and pass it through the queue
                             stream_finish = getattr(req, "_finish_reason", None)
                             if stream_finish is None:
-                                if req.output_token_ids and req.output_token_ids[-1] == req.eos_token_id:
+                                if req.stopped_on_token:
                                     stream_finish = "stop"
                                 else:
                                     stream_finish = "length"

@@ -88,6 +88,7 @@ class CompletionsMixin:
         request: CompletionRequest,
         api_key: Optional[str] = None,
         endpoint: str = "/v1/completions",
+        chat_response: bool = False,
     ):
         t0 = time.monotonic()
         prompt_ids = getattr(request, "_prompt_token_ids", None)
@@ -112,7 +113,11 @@ class CompletionsMixin:
                 prompt_ids[-5:], result.output_tokens, eos_id, result.finish_reason,
             )
 
-        resp = self._build_response(result, prompt_ids)
+        resp = self._build_response(
+            result,
+            prompt_ids,
+            chat_response=chat_response,
+        )
         context_metrics = getattr(request, "_context_metrics", None)
         if context_metrics is not None:
             resp._context_metrics = context_metrics
@@ -213,12 +218,12 @@ class CompletionsMixin:
                 finish_reason = item[1]
                 break
             output_ids.append(item)
-            token_text, prev_text = self._stream_text_delta(output_ids, prev_text)
+            token_text, prev_text = self._stream_chat_text_delta(output_ids, prev_text)
             if not token_text:
                 continue
             yield f"data: {json.dumps({'id': stream_id, 'object': 'chat.completion.chunk', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'content': token_text}, 'finish_reason': None}]})}\n\n"
 
-        token_text, prev_text = self._stream_text_delta(output_ids, prev_text, final=True)
+        token_text, prev_text = self._stream_chat_text_delta(output_ids, prev_text, final=True)
         if token_text:
             yield f"data: {json.dumps({'id': stream_id, 'object': 'chat.completion.chunk', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'content': token_text}, 'finish_reason': None}]})}\n\n"
 
@@ -253,11 +258,11 @@ class CompletionsMixin:
                             finish_reason = item[1]
                             break
                         final_ids.append(item)
-                        token_text, final_text = self._stream_text_delta(final_ids, final_text)
+                        token_text, final_text = self._stream_chat_text_delta(final_ids, final_text)
                         if token_text:
                             yield f"data: {json.dumps({'id': stream_id, 'object': 'chat.completion.chunk', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'content': token_text}, 'finish_reason': None}]})}\n\n"
 
-                    token_text, final_text = self._stream_text_delta(final_ids, final_text, final=True)
+                    token_text, final_text = self._stream_chat_text_delta(final_ids, final_text, final=True)
                     if token_text:
                         yield f"data: {json.dumps({'id': stream_id, 'object': 'chat.completion.chunk', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'content': token_text}, 'finish_reason': None}]})}\n\n"
 
@@ -453,6 +458,7 @@ class CompletionsMixin:
             presence_penalty=body.get("presence_penalty", 0.0),
             priority=body.get("priority", 0),
             suppress_first_tokens=self._space_suppress_ids,
+            stop_token_ids=self._chat_stop_token_ids(),
             user=self._chat_conversation_id(request, body),
         )
         req._pixel_values = pixel_values
@@ -513,7 +519,12 @@ class CompletionsMixin:
                     await gen.aclose()
                 return response
 
-            result = await self._async_complete(req, api_key=req_api_key, endpoint="/v1/chat/completions")
+            result = await self._async_complete(
+                req,
+                api_key=req_api_key,
+                endpoint="/v1/chat/completions",
+                chat_response=True,
+            )
             result_dict = result.to_dict()
             if result_dict["choices"]:
                 raw_text = result_dict["choices"][0]["text"]
@@ -559,6 +570,7 @@ class CompletionsMixin:
                                 follow_request,
                                 api_key=req_api_key,
                                 endpoint="/v1/chat/completions/final",
+                                chat_response=True,
                             )
                             follow_dict = follow_result.to_dict()
                             if follow_dict["choices"]:

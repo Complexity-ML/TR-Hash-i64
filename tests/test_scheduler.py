@@ -52,6 +52,18 @@ class TestSchedulerBasics:
         assert len(sched.pending) == 1
         assert sched.pending[0].status == RequestStatus.PENDING
 
+    def test_remove_request_purges_pending_heap(self):
+        sched = make_scheduler()
+        keep_id = sched.add_request(prompt(4, start=10))
+        remove_id = sched.add_request(prompt(4, start=20))
+
+        assert sched.remove_request(remove_id)
+        assert len(sched.pending) == 1
+        assert [req.request_id for req in sched.pending] == [keep_id]
+
+        batch = sched.schedule()
+        assert batch.request_ids.tolist() == [keep_id]
+
     def test_empty_schedule_returns_none(self):
         sched = make_scheduler()
         batch = sched.schedule()
@@ -472,6 +484,21 @@ class TestI64Request:
         )
         req.output_token_ids = [40, 50]
         assert req.get_last_token_id() == 50
+
+    def test_native_final_end_token_finishes_request(self):
+        req = I64Request(
+            request_id=0,
+            prompt_token_ids=np.array([10, 20], dtype=np.int64),
+            max_new_tokens=20,
+            eos_token_id=0,
+            stop_token_ids=(32_003,),
+        )
+        req.output_token_ids = [32_002, 11]
+        assert not req.is_finished
+
+        req.output_token_ids.append(32_003)
+        assert req.stopped_on_token
+        assert req.is_finished
 
     def test_prefill_complete(self):
         req = I64Request(

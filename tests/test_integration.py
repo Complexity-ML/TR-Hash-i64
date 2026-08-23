@@ -16,6 +16,7 @@ import torch
 import sys
 import os
 from collections import deque
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -175,6 +176,19 @@ class TestSlotPool:
         slot2 = engine._allocate_slot(101)
         assert slot1 == 0  # popleft gives first element
         assert slot2 == 1
+
+    def test_kv_slot_exhaustion_rolls_back_scheduler_admission(self):
+        """A rejected burst request must not poison the next engine batch."""
+        engine = I64Engine(model=None, num_experts=4, vocab_size=100, device="cpu")
+        engine.kv_cache = SimpleNamespace(prefix_cache_enabled=False)
+        engine._slot_pool.clear()
+
+        with pytest.raises(RuntimeError, match="No KV cache slots available"):
+            engine.add_request([1, 2, 3], max_new_tokens=4)
+
+        assert len(engine.scheduler.pending) == 0
+        assert len(engine.scheduler.running) == 0
+        assert engine.scheduler.schedule() is None
 
 
 class TestTimeoutHandling:

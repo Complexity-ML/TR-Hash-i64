@@ -100,6 +100,17 @@ class I64Request:
 
     # EOS token ID (set by engine when adding request)
     eos_token_id: int = 0
+    # Additional request-local terminal token IDs. Unlike text stop
+    # sequences, these are checked immediately after sampling and therefore
+    # cannot leak a following token into a streaming response.
+    stop_token_ids: Tuple[int, ...] = field(default_factory=tuple)
+
+    @property
+    def stopped_on_token(self) -> bool:
+        if not self.output_token_ids:
+            return False
+        token_id = self.output_token_ids[-1]
+        return token_id == self.eos_token_id or token_id in self.stop_token_ids
 
     @property
     def is_finished(self) -> bool:
@@ -108,7 +119,7 @@ class I64Request:
         if self.num_generated >= self.max_new_tokens:
             return True
         # Stop on EOS token
-        if self.output_token_ids and self.output_token_ids[-1] == self.eos_token_id:
+        if self.stopped_on_token:
             return True
         return False
 
@@ -231,6 +242,7 @@ class I64Scheduler:
         max_new_tokens: int = 256,
         priority: int = 0,
         eos_token_id: int = 0,
+        stop_token_ids: Optional[List[int]] = None,
         cache_namespace: Optional[bytes] = None,
     ) -> int:
         """
@@ -247,10 +259,40 @@ class I64Scheduler:
             priority=priority,
             arrival_step=self.step_counter,
             eos_token_id=eos_token_id,
+            stop_token_ids=tuple(stop_token_ids or ()),
             cache_namespace=cache_namespace,
         )
         heapq.heappush(self._pending_heap, (req.priority, req.arrival_step, req.request_id, req))
         return request_id
+
+    def remove_request(self, request_id: int) -> bool:
+        """Remove a request from every scheduler queue.
+
+        This rolls back admission when an engine-side resource allocation
+        fails. A pending request without its KV slot must never reach a later
+        continuous-batching step.
+        """
+        removed = False
+
+        retained_pending = []
+        for item in self._pending_heap:
+            req = item[3]
+            if req.request_id == request_id:
+                req.status = RequestStatus.FINISHED
+                removed = True
+            else:
+                retained_pending.append(item)
+        if len(retained_pending) != len(self._pending_heap):
+            self._pending_heap = retained_pending
+            heapq.heapify(self._pending_heap)
+
+        for queue in (self.running, self.preempted, self.finished):
+            original_len = len(queue)
+            queue[:] = [req for req in queue if req.request_id != request_id]
+            removed = removed or len(queue) != original_len
+
+        self._tokens_generated_per_req.pop(request_id, None)
+        return removed
 
     def _pop_pending(self) -> Optional[I64Request]:
         """Pop highest-priority pending request. O(log n)."""

@@ -38,9 +38,26 @@ class I64Tokenizer:
             ids = ids[:-1]
         return ids
 
-    def decode(self, token_ids: List[int]) -> str:
-        """i64 token IDs → text."""
-        return self.tokenizer.decode(token_ids)
+    def decode(
+        self,
+        token_ids: List[int],
+        *,
+        skip_special_tokens: bool = True,
+    ) -> str:
+        """i64 token IDs → text.
+
+        Normal completions hide special tokens. Chat response parsing can opt
+        out so native reasoning-envelope markers remain observable until the
+        API/UI has separated reasoning from the final answer.
+        """
+        return self.tokenizer.decode(
+            token_ids,
+            skip_special_tokens=skip_special_tokens,
+        )
+
+    def token_to_id(self, token: str) -> Optional[int]:
+        """Return the exact vocabulary ID for ``token`` when registered."""
+        return self.tokenizer.token_to_id(token)
 
     @property
     def vocab_size(self) -> int:

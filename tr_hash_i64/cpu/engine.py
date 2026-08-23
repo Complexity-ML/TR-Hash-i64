@@ -262,7 +262,7 @@ class AsyncCPUEngine(AsyncI64Engine):
                             if finish_reason is None:
                                 if (
                                     req.output_token_ids
-                                    and req.output_token_ids[-1] == req.eos_token_id
+                                    and req.stopped_on_token
                                 ):
                                     finish_reason = "stop"
                                 else:

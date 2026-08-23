@@ -26,6 +26,13 @@ logger = get_logger("tr_hash_i64.server")
 class HelpersMixin:
     """Shared helpers: tokenization, chat template, image pre-processing, response building."""
 
+    _NATIVE_CHAT_MARKERS = {
+        "<|think_start|>": 32_000,
+        "<|think_end|>": 32_001,
+        "<|final_start|>": 32_002,
+        "<|final_end|>": 32_003,
+    }
+
     # ------------------------------------------------------------------
     # Request ID
     # ------------------------------------------------------------------
@@ -48,11 +55,74 @@ class HelpersMixin:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self._tokenize_pool, self._tokenize, text)
 
-    def _detokenize(self, token_ids: List[int]) -> str:
+    def _detokenize(
+        self,
+        token_ids: List[int],
+        *,
+        skip_special_tokens: bool = True,
+    ) -> str:
         if self.tokenizer:
-            return self.tokenizer.decode(token_ids)
+            return self.tokenizer.decode(
+                token_ids,
+                skip_special_tokens=skip_special_tokens,
+            )
         safe_ids = [t & 0xFF for t in token_ids]
         return bytes(safe_ids).decode("utf-8", errors="replace")
+
+    def _native_chat_marker_ids(self) -> Dict[int, str]:
+        """Return only markers that are exact registered tokenizer tokens."""
+        if self.tokenizer is None:
+            return {}
+        token_to_id = getattr(self.tokenizer, "token_to_id", None)
+        if token_to_id is None:
+            backend = getattr(self.tokenizer, "tokenizer", None)
+            token_to_id = getattr(backend, "token_to_id", None)
+        if token_to_id is None:
+            return {}
+
+        markers: Dict[int, str] = {}
+        for token, expected_id in self._NATIVE_CHAT_MARKERS.items():
+            token_id = token_to_id(token)
+            if token_id is not None and int(token_id) == expected_id:
+                markers[int(token_id)] = token
+        return markers
+
+    def _chat_stop_token_ids(self) -> List[int]:
+        marker_ids = self._native_chat_marker_ids()
+        return [
+            token_id
+            for token_id, token in marker_ids.items()
+            if token == "<|final_end|>"
+        ]
+
+    def _detokenize_chat(self, token_ids: List[int]) -> str:
+        """Decode chat text while preserving native 32,004 envelope markers.
+
+        All other registered special tokens remain hidden. Segment-wise
+        decoding avoids exposing BOS/EOS/PAD while keeping the four SFT-v2
+        control tokens available to the UI parser.
+        """
+        markers = self._native_chat_marker_ids()
+        if not markers:
+            return self._detokenize(token_ids)
+
+        output: List[str] = []
+        text_ids: List[int] = []
+
+        def flush_text() -> None:
+            if text_ids:
+                output.append(self._detokenize(text_ids))
+                text_ids.clear()
+
+        for token_id in token_ids:
+            marker = markers.get(int(token_id))
+            if marker is None:
+                text_ids.append(int(token_id))
+                continue
+            flush_text()
+            output.append(marker)
+        flush_text()
+        return "".join(output)
 
     async def _detokenize_async(self, token_ids: List[int]) -> str:
         loop = asyncio.get_running_loop()
@@ -67,6 +137,17 @@ class HelpersMixin:
     ) -> tuple[str, str]:
         """Decode a stable streaming suffix without leaking partial UTF-8."""
         decoded = self._detokenize(token_ids)
+        stable_text = decoded if final else decoded.rstrip("\ufffd")
+        return stable_text[len(emitted_text):], stable_text
+
+    def _stream_chat_text_delta(
+        self,
+        token_ids: List[int],
+        emitted_text: str,
+        *,
+        final: bool = False,
+    ) -> tuple[str, str]:
+        decoded = self._detokenize_chat(token_ids)
         stable_text = decoded if final else decoded.rstrip("\ufffd")
         return stable_text[len(emitted_text):], stable_text
 
@@ -235,8 +316,18 @@ class HelpersMixin:
     # Response building
     # ------------------------------------------------------------------
 
-    def _build_response(self, result: GenerationResult, prompt_ids: List[int]) -> CompletionResponse:
-        output_text = self._detokenize(result.output_tokens)
+    def _build_response(
+        self,
+        result: GenerationResult,
+        prompt_ids: List[int],
+        *,
+        chat_response: bool = False,
+    ) -> CompletionResponse:
+        output_text = (
+            self._detokenize_chat(result.output_tokens)
+            if chat_response
+            else self._detokenize(result.output_tokens)
+        )
         choice = {"text": output_text, "index": 0, "finish_reason": result.finish_reason}
         if result.token_logprobs:
             choice["logprobs"] = {

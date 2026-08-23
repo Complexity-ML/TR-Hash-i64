@@ -116,6 +116,62 @@ def test_stream_decoder_waits_for_complete_utf8_character():
     assert emitted == "÷"
 
 
+class _NativeEnvelopeTokenizer:
+    _markers = {
+        "<|think_start|>": 32_000,
+        "<|think_end|>": 32_001,
+        "<|final_start|>": 32_002,
+        "<|final_end|>": 32_003,
+    }
+    _text = {10: "reason", 11: "answer"}
+
+    def token_to_id(self, token):
+        return self._markers.get(token)
+
+    def decode(self, token_ids, *, skip_special_tokens=True):
+        reverse = {value: key for key, value in self._markers.items()}
+        parts = []
+        for token_id in token_ids:
+            if token_id in reverse:
+                if not skip_special_tokens:
+                    parts.append(reverse[token_id])
+            else:
+                parts.append(self._text.get(token_id, ""))
+        return "".join(parts)
+
+
+def test_chat_decoder_preserves_only_native_reasoning_markers():
+    server = I64Server(
+        engine=None,
+        tokenizer=_NativeEnvelopeTokenizer(),
+    )
+
+    decoded = server._detokenize_chat(
+        [32_000, 10, 32_001, 32_002, 11, 32_003]
+    )
+
+    assert decoded == (
+        "<|think_start|>reason<|think_end|>"
+        "<|final_start|>answer<|final_end|>"
+    )
+    assert server._chat_stop_token_ids() == [32_003]
+
+
+def test_chat_stream_decoder_emits_native_markers_atomically():
+    server = I64Server(
+        engine=None,
+        tokenizer=_NativeEnvelopeTokenizer(),
+    )
+
+    delta, emitted = server._stream_chat_text_delta([32_000], "")
+    assert delta == "<|think_start|>"
+    assert emitted == "<|think_start|>"
+
+    delta, emitted = server._stream_chat_text_delta([32_000, 10], emitted)
+    assert delta == "reason"
+    assert emitted == "<|think_start|>reason"
+
+
 # =====================================================================
 # Health & Models
 # =====================================================================
@@ -830,10 +886,16 @@ class TestCompletionRequest:
         assert "frequency_penalty" in req.validate()
 
     def test_to_sampling_params(self):
-        req = CompletionRequest(prompt="hello", temperature=0.5, top_k=10)
+        req = CompletionRequest(
+            prompt="hello",
+            temperature=0.5,
+            top_k=10,
+            stop_token_ids=[32_003],
+        )
         params = req.to_sampling_params()
         assert params.temperature == 0.5
         assert params.top_k == 10
+        assert params.stop_token_ids == [32_003]
 
 
 class TestConversationCacheNamespace:
