@@ -6,10 +6,12 @@ Python package and CLI command are still named `tr_hash_i64` / `tr-hash-i64`
 internally (see Install/Serve below); only this repository's name has
 changed so far.
 
-- `tr-hash-moe-500m` → [`Pacific-i64/TR-HASH-MOE-500M-HF`](https://huggingface.co/Pacific-i64/TR-HASH-MOE-500M-HF) — the only model with a live public endpoint right now.
+- `tr-hash-moe-200m` → [`AETHORIA-AI/TR-HASH-MoE-200M-160B-SFT`](https://huggingface.co/AETHORIA-AI/TR-HASH-MoE-200M-160B-SFT) — the current public chat release and live endpoint.
+- `tr-hash-moe-500m` → [`Pacific-i64/TR-HASH-MOE-500M-HF`](https://huggingface.co/Pacific-i64/TR-HASH-MOE-500M-HF) — the earlier research release.
 
-The 500M runtime loads its layer-specific balanced hash tables exactly, uses
-top-2 0.5/0.5 routing and applies the trained shared/routed output scales.
+The runtime loads each release's persisted layer-specific multi-hash tables
+exactly, uses deterministic top-2 routing and applies the trained shared/routed
+output scales.
 
 The earlier 306.5M routed/dense comparison pair (`tr-moe-306` →
 [`Pacific-i64/TR-MOE-306`](https://huggingface.co/Pacific-i64/TR-MOE-306),
@@ -47,6 +49,8 @@ tr-hash-i64 serve tr-hash-moe-500m \
   --quantization none
 ```
 
+Use `tr-hash-moe-200m` for the current full-SFT assistant.
+
 Use `dense-306` for the matched dense baseline. A local directory can replace
 the Hub snapshot:
 
@@ -73,6 +77,52 @@ The CPU engine includes continuous batching, a paged KV cache, prefix caching,
 request streaming and queue backpressure. The same command automatically uses
 CUDA when a GPU is available.
 
+## Supervised production service
+
+TR-Hash-i64 can install the complete inference process group as a Supervisor
+service. Supervisor does not accelerate a matrix multiplication by itself. It
+keeps the tuned server warm and makes the operational performance settings
+durable: CUDA Graphs remain enabled, prefix caching stays active, the selected
+GPUs remain pinned, and a failed TP/PP group is restarted as one unit.
+
+Keep API credentials in a root-owned mode-`0600` file rather than in the
+process command line:
+
+```bash
+sudo install -d -m 700 /etc/tr-hash-i64
+sudo install -m 600 /dev/null /etc/tr-hash-i64/api.key
+sudoedit /etc/tr-hash-i64/api.key
+
+sudo tr-hash-i64 service install public-demo tr-hash-moe-200m \
+  --checkpoint /models/TR-HASH-MoE-200M-160B-SFT \
+  --directory /opt/TR-Hash-i64 \
+  --host 0.0.0.0 \
+  --port 7860 \
+  --devices 0 \
+  --api-key-file /etc/tr-hash-i64/api.key \
+  --max-batch-size 32 \
+  --chunk-size 512 \
+  --max-kv-blocks 512 \
+  --max-pending 128
+```
+
+Lifecycle and logs are available through one small command surface:
+
+```bash
+tr-hash-i64 service list
+tr-hash-i64 service status public-demo
+tr-hash-i64 service restart public-demo
+tr-hash-i64 service logs public-demo --follow
+sudo tr-hash-i64 service remove public-demo
+```
+
+The generated Supervisor definition uses `autorestart=unexpected`,
+`stopasgroup=true`, `killasgroup=true`, private configuration permissions and
+rotated combined logs. Distributed launch disables rank-local torchrun
+restarts, so Supervisor never leaves a partially replaced TP/PP group behind.
+Use `GET /live` for process liveness and `GET /ready` before admitting traffic;
+readiness is withdrawn while the model is loading or the server is draining.
+
 ## OpenAI-compatible API
 
 ```bash
@@ -96,6 +146,8 @@ endpoints and are applied per request after temperature scaling.
 Useful endpoints:
 
 - `GET /health`
+- `GET /live`
+- `GET /ready`
 - `GET /v1/models`
 - `POST /v1/completions`
 - `POST /v1/chat/completions`

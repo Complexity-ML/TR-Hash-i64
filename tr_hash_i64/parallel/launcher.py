@@ -42,6 +42,7 @@ def launch_distributed(tp_size: int, args: list, pp_size: int = 1) -> int:
         sys.executable,
         "-m", "torch.distributed.run",
         f"--nproc_per_node={nproc}",
+        "--max_restarts=0",
         "--master_port", _find_free_port(),
         "-m", "tr_hash_i64.parallel.worker",
     ] + args

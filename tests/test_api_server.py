@@ -145,6 +145,29 @@ async def test_health_checks_model_loaded(client):
 
 
 @pytest.mark.asyncio
+async def test_live_and_ready_are_separate_admission_signals(client, server):
+    live = await client.get("/live")
+    assert live.status == 200
+    assert (await live.json())["status"] == "ok"
+
+    # The process is alive, but this test engine intentionally has no model.
+    ready = await client.get("/ready")
+    assert ready.status == 503
+    assert (await ready.json())["status"] == "not_ready"
+
+    import torch.nn as nn
+
+    server.sync_engine.model = nn.Linear(2, 2)
+    ready = await client.get("/ready")
+    assert ready.status == 200
+    assert (await ready.json())["status"] == "ready"
+
+    server._shutting_down = True
+    live = await client.get("/live")
+    assert live.status == 503
+
+
+@pytest.mark.asyncio
 async def test_models(client):
     resp = await client.get("/v1/models")
     assert resp.status == 200

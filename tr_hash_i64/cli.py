@@ -7,6 +7,8 @@ Usage:
     tr-hash-i64 list
     tr-hash-i64 check <model>
     tr-hash-i64 estimate <model> [--dtype float16] [--max-batch-size 32]
+    tr-hash-i64 service install <name> <model> [--port 8000] [--tp 1]
+    tr-hash-i64 service status|start|stop|restart|logs|remove <name>
 
 Multi-GPU:
     tr-hash-i64 serve pacific-prime-chat --tp 4
@@ -22,6 +24,12 @@ _logger = logging.getLogger("tr_hash_i64.cli")
 
 def cmd_serve(args):
     """Start inference server (single-GPU or multi-GPU via torchrun)."""
+
+    if getattr(args, "api_key_file", None):
+        from pathlib import Path
+        from tr_hash_i64.service import load_protected_secret
+
+        args.api_key = load_protected_secret(Path(args.api_key_file))
 
     # --no-model mode: sandbox-only / RAG-only server (no GPU needed)
     if getattr(args, 'no_model', False):
@@ -73,6 +81,21 @@ def cmd_serve(args):
                 forward_args += ["--quantization", args.quantization]
             if args.context_compact_tokens is not None:
                 forward_args += ["--context-compact-tokens", str(args.context_compact_tokens)]
+            if args.api_key_file:
+                forward_args += ["--api-key-file", args.api_key_file]
+            if args.log_json:
+                forward_args += ["--log-json"]
+            forward_args += ["--max-batch-size", str(args.max_batch_size)]
+            forward_args += ["--chunk-size", str(args.chunk_size)]
+            forward_args += ["--max-kv-blocks", str(args.max_kv_blocks)]
+            forward_args += ["--rate-limit", str(args.rate_limit)]
+            forward_args += ["--max-pending", str(args.max_pending)]
+            if args.no_prefix_caching:
+                forward_args += ["--no-prefix-caching"]
+            if args.no_cuda_graphs:
+                forward_args += ["--no-cuda-graphs"]
+            if args.compile:
+                forward_args += ["--compile", "--compile-mode", args.compile_mode]
 
             _logger.info("Disaggregated mode: GPU 0 = prefill, GPU 1 = decode")
             rc = launch_disaggregated(tp_size=args.tp, args=forward_args)
@@ -93,6 +116,21 @@ def cmd_serve(args):
             forward_args += ["--quantization", args.quantization]
         if args.context_compact_tokens is not None:
             forward_args += ["--context-compact-tokens", str(args.context_compact_tokens)]
+        if args.api_key_file:
+            forward_args += ["--api-key-file", args.api_key_file]
+        if args.log_json:
+            forward_args += ["--log-json"]
+        forward_args += ["--max-batch-size", str(args.max_batch_size)]
+        forward_args += ["--chunk-size", str(args.chunk_size)]
+        forward_args += ["--max-kv-blocks", str(args.max_kv_blocks)]
+        forward_args += ["--rate-limit", str(args.rate_limit)]
+        forward_args += ["--max-pending", str(args.max_pending)]
+        if args.no_prefix_caching:
+            forward_args += ["--no-prefix-caching"]
+        if args.no_cuda_graphs:
+            forward_args += ["--no-cuda-graphs"]
+        if args.compile:
+            forward_args += ["--compile", "--compile-mode", args.compile_mode]
 
         rc = launch_distributed(tp_size=args.tp, pp_size=args.pp, args=forward_args)
         sys.exit(rc)
@@ -472,6 +510,150 @@ def cmd_estimate(args):
         print(f"    [{marker}] {name} ({size} GB){extra}")
 
 
+_SERVICE_COLORS = {
+    "RUNNING": "\033[1;32m",
+    "STARTING": "\033[36m",
+    "STOPPING": "\033[33m",
+    "STOPPED": "\033[33m",
+    "BACKOFF": "\033[1;31m",
+    "EXITED": "\033[31m",
+    "FATAL": "\033[1;31m",
+    "UNKNOWN": "\033[31m",
+}
+
+
+def _service_manager(args):
+    from pathlib import Path
+    from tr_hash_i64.service import ServiceManager
+
+    return ServiceManager(Path(args.config_dir) if args.config_dir else None)
+
+
+def _print_service_status(raw: str) -> None:
+    import os
+    from tr_hash_i64.service import status_fields
+
+    use_color = sys.stdout.isatty() and "NO_COLOR" not in os.environ
+    for line in raw.splitlines():
+        name, state, details = status_fields(line)
+        color = _SERVICE_COLORS.get(state, "") if use_color else ""
+        reset = "\033[0m" if color else ""
+        print(f"{name:<34} {color}{state:<9}{reset} {details}".rstrip())
+    if not raw.strip():
+        print("No managed TR-Hash-i64 services.")
+
+
+def cmd_service_install(args):
+    """Install one complete inference process group under Supervisor."""
+    from pathlib import Path
+    from tr_hash_i64.service import ServiceSpec, load_protected_secret
+
+    directory = Path(args.directory).resolve()
+    log_path = (
+        Path(args.log).resolve()
+        if args.log
+        else Path(f"/var/log/tr-hash-i64/{args.name}.log")
+    )
+    command = [
+        sys.executable,
+        "-m",
+        "tr_hash_i64.cli",
+        "serve",
+        args.model,
+        "--host",
+        args.host,
+        "--port",
+        str(args.port),
+        "--dtype",
+        args.dtype,
+        "--tp",
+        str(args.tp),
+        "--pp",
+        str(args.pp),
+        "--quantization",
+        args.quantization,
+        "--max-batch-size",
+        str(args.max_batch_size),
+        "--chunk-size",
+        str(args.chunk_size),
+        "--max-kv-blocks",
+        str(args.max_kv_blocks),
+        "--rate-limit",
+        str(args.rate_limit),
+        "--max-pending",
+        str(args.max_pending),
+    ]
+    if args.checkpoint:
+        command += ["--checkpoint", str(Path(args.checkpoint).resolve())]
+    if args.context_compact_tokens is not None:
+        command += ["--context-compact-tokens", str(args.context_compact_tokens)]
+    if args.api_key_file:
+        secret_path = Path(args.api_key_file).resolve()
+        load_protected_secret(secret_path)
+        command += ["--api-key-file", str(secret_path)]
+    if args.no_cuda_graphs:
+        command += ["--no-cuda-graphs"]
+    if args.no_prefix_caching:
+        command += ["--no-prefix-caching"]
+    if args.compile:
+        command += ["--compile"]
+    if args.log_json:
+        command += ["--log-json"]
+
+    if args.devices:
+        visible = [part.strip() for part in args.devices.split(",")]
+        if args.tp * args.pp > len(visible):
+            raise SystemExit("TP x PP cannot exceed the number of --devices")
+
+    spec = ServiceSpec(
+        name=args.name,
+        command=tuple(command),
+        directory=directory,
+        log_path=log_path,
+        host=args.host,
+        port=args.port,
+        devices=args.devices,
+        startsecs=args.startsecs,
+        startretries=args.startretries,
+        stopwaitsecs=args.stopwaitsecs,
+    )
+    path = _service_manager(args).install(spec)
+    print(f"Installed {spec.program_name}")
+    print(f"Configuration: {path}")
+    print(f"Logs: {spec.log_path}")
+
+
+def cmd_service_list(args):
+    _print_service_status(_service_manager(args).list())
+
+
+def cmd_service_status(args):
+    _print_service_status(_service_manager(args).status(args.name))
+
+
+def cmd_service_lifecycle(args):
+    result = getattr(_service_manager(args), args.service_command)(args.name)
+    if result:
+        print(result)
+
+
+def cmd_service_logs(args):
+    manager = _service_manager(args)
+    if args.follow:
+        try:
+            for line in manager.follow_logs(args.name, lines=args.lines):
+                print(line, end="")
+        except KeyboardInterrupt:
+            return
+    else:
+        print(manager.logs(args.name, lines=args.lines), end="")
+
+
+def cmd_service_remove(args):
+    _service_manager(args).remove(args.name, missing_ok=args.missing_ok)
+    print(f"Removed tr_hash_i64_{args.name}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="tr-hash-i64",
@@ -525,6 +707,8 @@ def main():
                          help="Enable swap-to-CPU for KV cache overflow")
     p_serve.add_argument("--api-key", default=None,
                          help="API key for bearer token authentication")
+    p_serve.add_argument("--api-key-file", default=None,
+                         help="Mode-0600 file containing the API key; preferred for services")
     p_serve.add_argument("--rate-limit", type=int, default=0,
                          help="Max requests per minute per IP (0 = unlimited)")
     p_serve.add_argument("--max-pending", type=int, default=0,
@@ -599,6 +783,80 @@ def main():
     p_est.add_argument("--max-batch-size", type=int, default=32, help="Max batch size (default: 32)")
     p_est.add_argument("--max-seq-len", type=int, default=2048, help="Max sequence length (default: 2048)")
     p_est.set_defaults(func=cmd_estimate)
+
+    # service
+    p_service = sub.add_parser("service", help="Install and control a supervised server")
+    service_sub = p_service.add_subparsers(dest="service_command", required=True)
+
+    def add_manager_option(command_parser):
+        command_parser.add_argument(
+            "--config-dir",
+            default=None,
+            help="Supervisor configuration directory (default: /etc/supervisor/conf.d)",
+        )
+
+    p_install = service_sub.add_parser("install", help="Install and start a server service")
+    p_install.add_argument("name", help="Stable service name")
+    p_install.add_argument("model", help="Registered model name")
+    p_install.add_argument("--directory", default=".", help="Server working directory")
+    p_install.add_argument("--log", default=None, help="Combined output log path")
+    p_install.add_argument("--host", default="0.0.0.0")
+    p_install.add_argument("--port", type=int, default=8000)
+    p_install.add_argument("--dtype", default="float16",
+                           choices=["float16", "bfloat16", "float32"])
+    p_install.add_argument("--tp", type=int, default=1)
+    p_install.add_argument("--pp", type=int, default=1)
+    p_install.add_argument("--devices", default=None,
+                           help="CUDA_VISIBLE_DEVICES list, e.g. 0,1,2,3")
+    p_install.add_argument("--quantization", default="none",
+                           choices=["int8", "int4", "awq", "gptq", "none"])
+    p_install.add_argument("--checkpoint", default=None)
+    p_install.add_argument("--context-compact-tokens", type=int, default=None)
+    p_install.add_argument("--max-batch-size", type=int, default=32,
+                           help="Maximum continuous-batching size")
+    p_install.add_argument("--chunk-size", type=int, default=512,
+                           help="Chunked-prefill token budget")
+    p_install.add_argument("--max-kv-blocks", type=int, default=0,
+                           help="KV block budget; 0 selects the engine default")
+    p_install.add_argument("--rate-limit", type=int, default=0,
+                           help="Maximum requests per minute per IP; 0 is unlimited")
+    p_install.add_argument("--max-pending", type=int, default=0,
+                           help="Reject above this pending-request count; 0 is unlimited")
+    p_install.add_argument("--no-prefix-caching", action="store_true")
+    p_install.add_argument("--api-key-file", default=None)
+    p_install.add_argument("--no-cuda-graphs", action="store_true")
+    p_install.add_argument("--compile", action="store_true")
+    p_install.add_argument("--log-json", action="store_true")
+    p_install.add_argument("--startsecs", type=int, default=10)
+    p_install.add_argument("--startretries", type=int, default=3)
+    p_install.add_argument("--stopwaitsecs", type=int, default=60)
+    add_manager_option(p_install)
+    p_install.set_defaults(func=cmd_service_install)
+
+    p_service_list = service_sub.add_parser("list", help="List managed servers")
+    add_manager_option(p_service_list)
+    p_service_list.set_defaults(func=cmd_service_list)
+
+    for action in ("status", "start", "stop", "restart"):
+        action_parser = service_sub.add_parser(action, help=f"{action.capitalize()} a server")
+        action_parser.add_argument("name")
+        add_manager_option(action_parser)
+        action_parser.set_defaults(
+            func=cmd_service_status if action == "status" else cmd_service_lifecycle
+        )
+
+    p_logs = service_sub.add_parser("logs", help="Read or follow server logs")
+    p_logs.add_argument("name")
+    p_logs.add_argument("--lines", "-n", type=int, default=100)
+    p_logs.add_argument("--follow", "-f", action="store_true")
+    add_manager_option(p_logs)
+    p_logs.set_defaults(func=cmd_service_logs)
+
+    p_remove = service_sub.add_parser("remove", help="Remove a managed server")
+    p_remove.add_argument("name")
+    p_remove.add_argument("--missing-ok", action="store_true")
+    add_manager_option(p_remove)
+    p_remove.set_defaults(func=cmd_service_remove)
 
     args = parser.parse_args()
     if not args.command:

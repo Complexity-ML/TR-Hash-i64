@@ -139,6 +139,7 @@ class I64Server(HelpersMixin, CompletionsMixin, AdminMixin, RAGMixin, AgentMixin
         self.context_compact_tokens = context_compact_tokens
         self._start_time = time.monotonic()
         self._shutting_down = False
+        self._ready = False
         self._last_expert_response: dict | None = None
 
         # ── Trackers ─────────────────────────────────────────────────────
@@ -222,6 +223,8 @@ class I64Server(HelpersMixin, CompletionsMixin, AdminMixin, RAGMixin, AgentMixin
 
         # Misc
         app.router.add_get("/health", self.handle_health)
+        app.router.add_get("/live", self.handle_live)
+        app.router.add_get("/ready", self.handle_ready)
         app.router.add_get("/v1/models", self.handle_models)
         app.router.add_get("/v1/models/{model_id}", self.handle_model_info)
         app.router.add_post("/v1/tokenize", self.handle_tokenize)
@@ -278,9 +281,11 @@ class I64Server(HelpersMixin, CompletionsMixin, AdminMixin, RAGMixin, AgentMixin
             logger.info("Engine started: continuous batching active")
         else:
             logger.info("Sandbox-only mode: no engine to start")
+        self._ready = True
 
     async def _on_cleanup(self, app: web.Application) -> None:
         logger.info("Server cleanup: draining requests...")
+        self._ready = False
         self._shutting_down = True
         if self.async_engine is not None:
             await self.async_engine.stop(drain_timeout=30.0)
@@ -290,6 +295,7 @@ class I64Server(HelpersMixin, CompletionsMixin, AdminMixin, RAGMixin, AgentMixin
         logger.info("tr-hash-i64 :: %s", self.model_name)
         logger.info("  http://%s:%d", self.host, self.port)
         logger.info("  POST /v1/completions | POST /v1/chat/completions | GET /health")
+        logger.info("  GET /live | GET /ready")
         logger.info("  POST /v1/batch | GET /v1/models/{id} | GET /v1/metrics | GET /v1/logs")
         logger.info("  POST /v1/cancel/{id} | WS /v1/ws/completions | GET /docs")
         if self.rag_enabled:

@@ -508,6 +508,8 @@ class TestDetailedHealth:
         assert "/v1/lora/load" in routes
         assert "/v1/lora/unload" in routes
         assert "/v1/lora/list" in routes
+        assert "/live" in routes
+        assert "/ready" in routes
 
 
 # =====================================================================

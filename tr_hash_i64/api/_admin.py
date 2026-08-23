@@ -21,6 +21,27 @@ logger = get_logger("tr_hash_i64.server")
 
 class AdminMixin:
 
+    async def handle_live(self, request: web.Request) -> web.Response:
+        """GET /live -- process liveness, independent of model readiness."""
+        if self._shutting_down:
+            return web.json_response({"status": "stopping"}, status=503)
+        return web.json_response({"status": "ok"})
+
+    async def handle_ready(self, request: web.Request) -> web.Response:
+        """GET /ready -- safe admission gate for external supervisors."""
+        model_ready = (
+            self.sync_engine is None
+            or getattr(self.sync_engine, "model", None) is not None
+        )
+        ready = self._ready and not self._shutting_down and model_ready
+        return web.json_response(
+            {
+                "status": "ready" if ready else "not_ready",
+                "model": self.model_name,
+            },
+            status=200 if ready else 503,
+        )
+
     def _public_model_metadata(self) -> dict:
         metadata = {
             "id": self.model_name,
