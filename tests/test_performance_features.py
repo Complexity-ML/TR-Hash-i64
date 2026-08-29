@@ -172,6 +172,14 @@ class TestFP8KVCache:
 # =========================================================================
 
 class TestMultiBatchCUDAGraphs:
+    def test_graph_safe_context_covers_warmup_and_capture_dispatch(self):
+        from tr_hash_i64.core.graph_context import graph_safe_mode, is_graph_safe_mode
+
+        assert not is_graph_safe_mode()
+        with graph_safe_mode():
+            assert is_graph_safe_mode()
+        assert not is_graph_safe_mode()
+
     def test_find_best_size(self):
         from tr_hash_i64.core.cuda_graph import CUDAGraphRunner
 

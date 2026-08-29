@@ -15,6 +15,8 @@ and selects the smallest captured graph >= actual batch size.
 import torch
 from typing import Optional, Callable, Dict, Set
 
+from tr_hash_i64.core.graph_context import graph_safe_mode
+
 
 class CUDAGraphRunner:
     """
@@ -67,27 +69,30 @@ class CUDAGraphRunner:
             "expert_ids": expert_ids.clone(),
         }
 
-        # Warmup (CUDA graphs require warm streams)
-        s = torch.cuda.Stream()
-        s.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(s):
-            for _ in range(3):
+        # Warm-up and capture must take the exact same Python dispatch path.
+        # In particular, is_current_stream_capturing() is false during warm-up,
+        # so graph-safe MoE/RMSNorm paths are selected through this explicit
+        # context for both phases.
+        with graph_safe_mode(), torch.no_grad():
+            s = torch.cuda.Stream()
+            s.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(s):
+                for _ in range(3):
+                    out = self.forward_fn(
+                        static_in["token_ids"],
+                        static_in["positions"],
+                        static_in["expert_ids"],
+                    )
+            torch.cuda.current_stream().wait_stream(s)
+            torch.cuda.synchronize()
+
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
                 out = self.forward_fn(
                     static_in["token_ids"],
                     static_in["positions"],
                     static_in["expert_ids"],
                 )
-        torch.cuda.current_stream().wait_stream(s)
-        torch.cuda.synchronize()
-
-        # Capture
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            out = self.forward_fn(
-                static_in["token_ids"],
-                static_in["positions"],
-                static_in["expert_ids"],
-            )
 
         self.graphs[bs] = graph
         self.static_inputs[bs] = static_in

@@ -280,6 +280,12 @@ class I64Engine:
         try:
             from tr_hash_i64.core.cuda_graph import CUDAGraphRunner
 
+            # Inference never needs autograd.  Keeping parameters grad-enabled
+            # makes graph capture retain autograd state and differs from the
+            # normal no-grad replay contract.
+            if self.model is not None:
+                self.model.requires_grad_(False)
+
             # Init graph buffers in KV cache for static block_table/seqlens
             if self.kv_cache is not None:
                 self.kv_cache.init_graph_buffers(max_batch_size)

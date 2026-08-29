@@ -222,6 +222,23 @@ class TestDecodeStep:
             device="cpu",
         )
 
+    def test_graph_safe_context_selects_dense_expert_dispatch(self, moe_model, monkeypatch):
+        from tr_hash_i64.core.graph_context import graph_safe_mode
+
+        mlp = moe_model.layers[0].mlp
+        called = []
+        original_dense = mlp._dense_expert_forward
+
+        def tracked_dense(x, expert_ids):
+            called.append(True)
+            return original_dense(x, expert_ids)
+
+        monkeypatch.setattr(mlp, "_dense_expert_forward", tracked_dense)
+        with torch.no_grad(), graph_safe_mode():
+            moe_model(torch.tensor([1, 2, 3]))
+
+        assert called
+
     def test_matches_cached_forward(self, moe_config, moe_model):
         prefill_ids = torch.tensor([3, 9, 12])
         next_id = torch.tensor([7])

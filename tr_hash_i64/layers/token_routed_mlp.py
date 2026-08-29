@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional
 
+from tr_hash_i64.core.graph_context import is_graph_safe_mode
 from tr_hash_i64.parallel.tensor_parallel import get_tp, all_reduce
 class TokenRoutedMLP(nn.Module):
     """
@@ -134,7 +135,7 @@ class TokenRoutedMLP(nn.Module):
 
     def expert_forward(self, x: torch.Tensor, expert_ids: torch.Tensor) -> torch.Tensor:
         """Sparse dispatch with loop — matches framework supplementary code."""
-        if (x.is_cuda and torch.cuda.is_current_stream_capturing()) or x.device.type == "mps":
+        if is_graph_safe_mode() or x.device.type == "mps":
             return self._dense_expert_forward(x, expert_ids)
 
         output = torch.zeros_like(x)

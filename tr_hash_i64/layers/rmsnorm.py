@@ -13,6 +13,8 @@ Integer path (enabled by weight_q12 buffer):
 import torch
 import torch.nn as nn
 
+from tr_hash_i64.core.graph_context import is_graph_safe_mode
+
 # Fixed-point scales for integer RMSNorm
 _Q_NORM = 128      # Q7 for normalized values (~unit scale after RMSNorm)
 _Q_WEIGHT = 4096   # Q12 for weights (~1.0, 12-bit resolution)
@@ -33,7 +35,7 @@ class RMSNorm(nn.Module):
         if not (x.is_cuda and x.dim() == 2):
             return None
         # Priority 1: CUDA I64_rmsnorm_quant_forward — skip during graph capture
-        if not torch.cuda.is_current_stream_capturing():
+        if not is_graph_safe_mode() and not torch.cuda.is_current_stream_capturing():
             try:
                 from tr_hash_i64.kernels.cuda import get_i64_cuda_ops
                 cuda_ops = get_i64_cuda_ops()
@@ -56,7 +58,7 @@ class RMSNorm(nn.Module):
         if not (x.is_cuda and x.dim() == 2):
             return None
         # Priority 1: CUDA I64_rmsnorm — skip during graph capture (pybind11 not capture-safe)
-        capturing = torch.cuda.is_current_stream_capturing()
+        capturing = is_graph_safe_mode() or torch.cuda.is_current_stream_capturing()
         if not capturing:
             try:
                 from tr_hash_i64.kernels.cuda import get_i64_cuda_ops
