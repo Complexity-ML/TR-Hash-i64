@@ -23,6 +23,32 @@ import sys
 _logger = logging.getLogger("tr_hash_i64.cli")
 
 
+def _select_device(torch_module, requested: str) -> str:
+    """Resolve a requested device without silently weakening an explicit choice."""
+
+    if requested == "cuda":
+        if not torch_module.cuda.is_available():
+            raise SystemExit(
+                "CUDA was explicitly requested but is not available. "
+                "Refusing to fall back to CPU."
+            )
+        return "cuda"
+    if requested == "mps":
+        if not torch_module.backends.mps.is_available():
+            raise SystemExit(
+                "MPS was explicitly requested but is not available. "
+                "Refusing to fall back to CPU."
+            )
+        return "mps"
+    if requested == "cpu":
+        return "cpu"
+    if torch_module.cuda.is_available():
+        return "cuda"
+    if torch_module.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 def cmd_serve(args):
     """Start inference server (single-GPU or multi-GPU via torchrun)."""
 
@@ -73,6 +99,7 @@ def cmd_serve(args):
             forward_args += ["--host", args.host]
             forward_args += ["--port", str(args.port)]
             forward_args += ["--dtype", args.dtype]
+            forward_args += ["--device", args.device]
             forward_args += ["--disaggregated"]
             if args.checkpoint:
                 forward_args += ["--checkpoint", args.checkpoint]
@@ -109,6 +136,7 @@ def cmd_serve(args):
         forward_args += ["--host", args.host]
         forward_args += ["--port", str(args.port)]
         forward_args += ["--dtype", args.dtype]
+        forward_args += ["--device", args.device]
         if args.checkpoint:
             forward_args += ["--checkpoint", args.checkpoint]
         if args.chat_template:
@@ -149,12 +177,7 @@ def cmd_serve(args):
 
     dtype_map = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}
     dtype = dtype_map[args.dtype]
-    if torch.cuda.is_available():
-        device = "cuda"
-    elif torch.backends.mps.is_available():
-        device = "mps"
-    else:
-        device = "cpu"
+    device = _select_device(torch, args.device)
 
     # CPU doesn't support FP16/BF16 natively on most hardware — override to float32
     if device == "cpu" and dtype in (torch.float16, torch.bfloat16):
@@ -824,6 +847,12 @@ def main():
     p_serve.add_argument("--host", default="0.0.0.0")
     p_serve.add_argument("--port", type=int, default=8000)
     p_serve.add_argument("--dtype", default="float16", choices=["float16", "bfloat16", "float32"])
+    p_serve.add_argument(
+        "--device",
+        default="auto",
+        choices=["auto", "cuda", "mps", "cpu"],
+        help="Execution device. Explicit choices never fall back silently (default: auto)",
+    )
     p_serve.add_argument("--tp", type=int, default=1, help="Tensor parallel size (num GPUs)")
     p_serve.add_argument("--pp", type=int, default=1, help="Pipeline parallel size (num stages)")
     p_serve.add_argument("--quantization", default="none",
