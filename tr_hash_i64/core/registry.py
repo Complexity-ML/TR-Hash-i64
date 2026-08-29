@@ -123,12 +123,9 @@ register_model(
     name="tr-hash-moe-200m",
     model_class=_COMPLEXITY_DEEP[0],
     config_loader=_COMPLEXITY_DEEP[1],
-    checkpoint="AETHORIA-AI/tr-hash-200m-70b-replay-checkpoints",
+    checkpoint="AETHORIA-AI/TR-HASH-MoE-200M-160B-SFT",
     parameters="201.2M",
-    description=(
-        "In-progress 200M multi-hash MoE replay run — resolves to the "
-        "latest token_pack_NNN_* checkpoint in the repo, not a stable release"
-    ),
+    description="Released 32K full-parameter SFT v1 with deterministic multi-hash routing",
 )
 
 register_model(

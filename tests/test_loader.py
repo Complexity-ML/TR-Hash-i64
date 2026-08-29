@@ -128,6 +128,14 @@ class TestPublicRegistry:
         assert entry.checkpoint == "Pacific-i64/TR-HASH-MOE-500M-HF"
         assert entry.parameters == "492.1M"
 
+    def test_tr_hash_200m_registry_entry_is_stable_sft_v1(self):
+        from tr_hash_i64.core.registry import get_model_entry
+
+        entry = get_model_entry("tr-hash-moe-200m")
+        assert entry.checkpoint == "AETHORIA-AI/TR-HASH-MoE-200M-160B-SFT"
+        assert entry.parameters == "201.2M"
+        assert "SFT v1" in entry.description
+
 
 class TestGetModuleForParam:
     def test_finds_linear(self):
