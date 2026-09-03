@@ -1,113 +1,143 @@
 # TR-Hash-i64
 
-An independent inference server for deterministic token-routed models from
-Complexity-ML -- not a fork of, or affiliated with, the vLLM project. The
-Python package and CLI command are still named `tr_hash_i64` / `tr-hash-i64`
-internally (see Install/Serve below); only this repository's name has
-changed so far.
+[![CI](https://github.com/Complexity-ML/TR-Hash-i64/actions/workflows/ci.yml/badge.svg)](https://github.com/Complexity-ML/TR-Hash-i64/actions/workflows/ci.yml)
+[![Python 3.10–3.12](https://img.shields.io/badge/python-3.10%E2%80%933.12-blue.svg)](https://www.python.org/)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](pyproject.toml)
 
-- `tr-hash-moe-200m` → [`AETHORIA-AI/TR-HASH-MoE-200M-160B-SFT`](https://huggingface.co/AETHORIA-AI/TR-HASH-MoE-200M-160B-SFT) — the current public chat release and live endpoint.
-- `tr-hash-moe-500m` → [`Pacific-i64/TR-HASH-MOE-500M-HF`](https://huggingface.co/Pacific-i64/TR-HASH-MOE-500M-HF) — the earlier research release.
+An independent inference engine and OpenAI-compatible server for Complexity-ML's deterministic token-routed language models. For the current SFT release, TR-Hash-i64 loads the complete persisted top-k routing tables verbatim and serves the model on CUDA, Apple MPS, or CPU.
 
-The runtime loads each release's persisted layer-specific multi-hash tables
-exactly, uses deterministic top-2 routing and applies the trained shared/routed
-output scales.
+> TR-Hash-i64 is not a vLLM fork and is not affiliated with the vLLM project.
 
-The earlier 306.5M routed/dense comparison pair (`tr-moe-306` →
-[`Pacific-i64/TR-MOE-306`](https://huggingface.co/Pacific-i64/TR-MOE-306),
-`dense-306` → [`Pacific-i64/Dense-306`](https://huggingface.co/Pacific-i64/Dense-306))
-is no longer served in production, but the checkpoints stay on the Hub and
-both names remain registered — `tr-hash-i64 serve tr-moe-306` /
-`... serve dense-306` still work for local/self-hosted use.
+## Why this runtime exists
 
-### Routing
+A TR-Hash layer does not run a learned router at inference time. Every expert assignment is an integer lookup into a persisted `[top_k, vocab_size]` table:
 
-Every expert assignment is a lookup into `topk_token_to_expert`, a
-`[top_k, vocab]` table of independent hash channels computed at training
-time (multi-hash rendezvous routing) and loaded verbatim from the checkpoint
-— nothing is recomputed or approximated at inference. On GPU, decode uses a
-CUDA-graph-safe path (`decode_step`): KV cache writes/reads and expert
-dispatch are tensor-only, with no per-token `.item()` calls, so the whole
-decode step can be captured once and replayed with near-zero launch overhead.
-
-
-
-## Install
-
-```bash
-pip install git+https://github.com/Complexity-ML/TR-Hash-i64.git@main
+```text
+expert_ids = topk_token_to_expert[:, token_id]
 ```
 
-## Serve
+That contract shapes the runtime:
 
-The model snapshot is downloaded automatically from Hugging Face:
+- exact loading of the current SFT checkpoint's layer-specific multi-hash route tables;
+- deterministic top-2 expert dispatch;
+- continuous batching with a paged KV cache and prefix reuse;
+- selective LM-head projection during prefill;
+- tensor-only CUDA Graph decode for common batch sizes;
+- a dedicated CPU path with safe dynamic INT8 behavior;
+- OpenAI-compatible HTTP, SSE, and WebSocket interfaces.
+
+Training and checkpoint creation remain outside this repository. This project is the production inference boundary.
+
+## Models
+
+| CLI name | Checkpoint | Parameters | Role |
+| --- | --- | ---: | --- |
+| `tr-hash-moe-200m` | [`AETHORIA-AI/TR-HASH-MoE-200M-160B-SFT`](https://huggingface.co/AETHORIA-AI/TR-HASH-MoE-200M-160B-SFT) | 201.2M | Current public SFT assistant |
+| `tr-hash-moe-500m` | [`Pacific-i64/TR-HASH-MOE-500M-HF`](https://huggingface.co/Pacific-i64/TR-HASH-MOE-500M-HF) | 492.1M | Earlier research release |
+| `tr-moe-306` | [`Pacific-i64/TR-MOE-306`](https://huggingface.co/Pacific-i64/TR-MOE-306) | 306.5M | Routed comparison checkpoint |
+| `dense-306` | [`Pacific-i64/Dense-306`](https://huggingface.co/Pacific-i64/Dense-306) | 306.5M | Width-matched dense baseline |
+
+## Quick start
+
+TR-Hash-i64 requires Python 3.10–3.12 and PyTorch 2.0 or newer.
 
 ```bash
-tr-hash-i64 serve tr-hash-moe-500m \
-  --host 0.0.0.0 \
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install "git+https://github.com/Complexity-ML/TR-Hash-i64.git@main"
+```
+
+Start the current SFT release on CUDA:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 tr-hash-i64 serve tr-hash-moe-200m \
+  --device cuda \
+  --host 127.0.0.1 \
   --port 7860 \
-  --quantization none
+  --max-batch-size 16
 ```
 
-Use `tr-hash-moe-200m` for the current full-SFT assistant.
-
-Use `dense-306` for the matched dense baseline. A local directory can replace
-the Hub snapshot:
+Or run dynamic INT8 on an x86 CPU:
 
 ```bash
-tr-hash-i64 serve dense-306 \
-  --checkpoint /models/Dense-306 \
-  --port 7860
-```
-
-For a Linux x86 CPU deployment, dynamic INT8 packs every `nn.Linear` weight
-with the PyTorch x86/FBGEMM backend while leaving the token-routing tables as
-integers:
-
-```bash
-TR_HASH_I64_CPU_THREADS=8 \
-tr-hash-i64 serve tr-moe-306 \
+TR_HASH_I64_CPU_THREADS=8 tr-hash-i64 serve tr-hash-moe-200m \
+  --device cpu \
+  --host 127.0.0.1 \
   --port 7860 \
   --quantization int8 \
   --max-batch-size 4 \
   --max-kv-blocks 128
 ```
 
-The CPU engine includes continuous batching, a paged KV cache, prefix caching,
-request streaming and queue backpressure. The same command automatically uses
-CUDA when a GPU is available. During prefill it projects only the final hidden
-row required for sampling instead of materializing logits for every prompt
-token. Reproduce the checkpoint-level CPU measurement with:
+Wait for readiness, then send a chat request:
 
 ```bash
-python benchmarks/bench_cpu_prefill.py \
-  --model-dir /path/to/TR-HASH-MoE-200M-160B-SFT \
-  --model-id AETHORIA-AI/TR-HASH-MoE-200M-160B-SFT \
-  --quantization int8 --prompt-len 128 --repeats 9 \
-  --output cpu-prefill.json
+curl --fail http://127.0.0.1:7860/ready
+
+curl http://127.0.0.1:7860/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "tr-hash-moe-200m",
+    "messages": [{"role": "user", "content": "Explain deterministic token routing."}],
+    "max_tokens": 128,
+    "temperature": 0.7
+  }'
 ```
 
-On the released 200M SFT checkpoint with dynamic INT8, 8 CPU threads and a
-128-token prompt, the median production prefill fell from 158.799 ms to
-143.404 ms (9.69% lower latency) with an identical final-logit sum.
-The protocol and raw trials are recorded under `benchmarks/results/`.
+The model snapshot is downloaded from Hugging Face on first use. Pass `--checkpoint /path/to/model` to use a local Hugging Face-format directory.
 
-## Supervised production service
+## Runtime features
 
-TR-Hash-i64 can install the complete inference process group as a Supervisor
-service. Supervisor does not accelerate a matrix multiplication by itself. It
-keeps the tuned server warm and makes the operational performance settings
-durable: CUDA Graphs remain enabled, prefix caching stays active, the selected
-GPUs remain pinned, and a failed TP/PP group is restarted as one unit.
+| Area | Support |
+| --- | --- |
+| Scheduling | Continuous batching, chunked prefill, queue backpressure, cancellation |
+| KV state | Paged KV cache, prefix caching, copy-on-write, optional supported FP8 cache |
+| Accelerators | CUDA eager, CUDA Graphs, Apple MPS traced decode, explicit no-fallback device selection |
+| CPU | Dedicated async engine, dynamic INT8, selective prefill logits |
+| Quantization | Dynamic INT8/INT4 and compatible pre-quantized AWQ/GPTQ checkpoints |
+| Parallelism | Tensor parallel, pipeline parallel, optional disaggregated prefill/decode |
+| Serving | OpenAI-compatible completions/chat, SSE, WebSocket, batching, monitoring |
+| Extensions | LoRA, RAG endpoints, optional sandbox and agent event APIs |
+| Operations | Supervisor service manager, profiles, watchdog, diagnostics, atomic upgrade/rollback |
 
-Keep API credentials in a root-owned mode-`0600` file rather than in the
-process command line:
+CUDA Graphs are enabled by default on CUDA and retain eager fallback for unsupported shapes. Explicit device choices fail rather than silently switching to another backend.
+
+## Documentation
+
+- [Getting started](docs/getting-started.md) — install, CUDA/CPU/MPS serving, local checkpoints
+- [Architecture](docs/architecture.md) — routing contract, prefill, decode, KV cache, fusion
+- [API guide](docs/api.md) — completions, chat, streaming, authentication, endpoint map
+- [Production operations](docs/operations.md) — Supervisor, profiles, watchdog, upgrades
+- [Benchmarks and evidence](docs/benchmarks.md) — protocols, provenance, raw results
+
+The running server also exposes its generated OpenAPI document at `GET /docs`.
+
+## Measured results
+
+Results below use `AETHORIA-AI/TR-HASH-MoE-200M-160B-SFT` and are backed by checked-in JSON artifacts.
+
+### CPU prefill
+
+On the production CPU path with dynamic INT8, 8 threads, and a 128-token prompt:
+
+| Baseline | Optimized | Change |
+| ---: | ---: | ---: |
+| 158.799 ms | 143.404 ms | **−9.69% latency** |
+
+The final-logit sum was identical. See [`benchmarks/results/cpu_sft_int8_prefill_2026-09-03.json`](benchmarks/results/cpu_sft_int8_prefill_2026-09-03.json).
+
+### Dense top-k CUDA dispatch
+
+On an RTX 5060 Ti at 150 W, a matched three-trial comparison measured median CUDA Graph choice-token throughput of 440.47 token/s before and 457.95 token/s after the isolated dense top-k dispatch change: **+3.97%**.
+
+This number is scoped to the source hashes and protocol in [`benchmarks/results/rtx5060ti_sft_dense_topk_2026-09-03.json`](benchmarks/results/rtx5060ti_sft_dense_topk_2026-09-03.json). Later current-tree validation is recorded as a functional smoke, not as a new matched performance claim.
+
+## Production service
+
+For a durable Supervisor-managed deployment:
 
 ```bash
-sudo install -d -m 700 /etc/tr-hash-i64
-sudo install -m 600 /dev/null /etc/tr-hash-i64/api.key
-sudoedit /etc/tr-hash-i64/api.key
-
 sudo tr-hash-i64 service install public-demo tr-hash-moe-200m \
   --checkpoint /models/TR-HASH-MoE-200M-160B-SFT \
   --directory /opt/TR-Hash-i64 \
@@ -115,165 +145,35 @@ sudo tr-hash-i64 service install public-demo tr-hash-moe-200m \
   --port 7860 \
   --devices 0 \
   --api-key-file /etc/tr-hash-i64/api.key \
-  --profile balanced \
-  --max-pending 128
+  --profile balanced
 ```
 
-Three named profiles hide the routine scheduler configuration while still
-allowing explicit overrides:
-
-| Profile | Batch | Prefill chunk | KV blocks | Intended use |
-| --- | ---: | ---: | ---: | --- |
-| `latency` | 8 | 256 | 256 | interactive, low concurrency |
-| `balanced` | 32 | 512 | 512 | safe mixed-traffic default |
-| `throughput` | 64 | 1024 | 1024 | sustained concurrent traffic |
-
-`service profiles` prints these values. `--max-batch-size`, `--chunk-size` and
-`--max-kv-blocks` override one value without creating a new profile.
-
-Lifecycle, readiness, diagnostics and logs use one command surface:
-
 ```bash
-tr-hash-i64 service list
 tr-hash-i64 service status public-demo
 tr-hash-i64 service doctor public-demo
-tr-hash-i64 service restart public-demo
 tr-hash-i64 service logs public-demo -f
-sudo tr-hash-i64 service remove public-demo
 ```
 
-`status` combines Supervisor state with live `/ready` and `/v1/monitor` data,
-including the profile, GPU assignment, VRAM, batch size and observed token
-throughput. `doctor` checks Supervisor, private configuration permissions, the
-executable, checkpoint, secret file, CUDA devices and free VRAM, listening
-port, process state and readiness. It exits non-zero on a failed check.
+See [Production operations](docs/operations.md) before exposing a service publicly. Host-level eGPU recovery and stable UUID/power policy live in the separate [TR-Hash-Server](https://github.com/Complexity-ML/tr-hash-server) project.
 
-The generated Supervisor definition uses `autorestart=unexpected`,
-`stopasgroup=true`, `killasgroup=true`, private configuration permissions and
-rotated combined logs. Distributed launch disables rank-local torchrun
-restarts, so Supervisor never leaves a partially replaced TP/PP group behind.
-Use `GET /live` for process liveness and `GET /ready` before admitting traffic;
-readiness is withdrawn while the model is loading or the server is draining.
-
-By default, a separate readiness watchdog starts after a 120-second warm-up.
-Three consecutive `/ready` failures, ten seconds apart, restart the complete
-inference process group. Manual stop/restart and maintenance suspend the
-watchdog first, preventing it from fighting an intentional operation. Use
-`--no-watchdog` only when another orchestrator already owns readiness recovery;
-the interval, threshold and warm-up are separately configurable.
-
-Tune a host after installation with a bounded, rollback-safe benchmark:
+## Development
 
 ```bash
-sudo tr-hash-i64 service autotune public-demo --profile balanced
-```
-
-Each candidate receives a full process-group restart and readiness check. OOM
-or failed candidates are rejected, the fastest successful candidate is kept,
-and the original configuration is restored if every candidate fails. This
-measures the installed model on the actual host; Supervisor itself does not
-make inference kernels faster.
-
-Upgrade into a versioned virtual environment without replacing the working
-release in place:
-
-```bash
-sudo tr-hash-i64 service upgrade public-demo --ref main
-```
-
-The Git ref is resolved to an immutable commit, installed under
-`/var/lib/tr-hash-i64/releases`, then both the server and watchdog commands are
-switched to that release. The command waits for `/ready`; on failure it restores
-the previous private Supervisor configuration, restarts the old release and
-verifies readiness again.
-
-## OpenAI-compatible API
-
-```bash
-curl http://127.0.0.1:7860/v1/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "tr-hash-moe-500m",
-    "prompt": "The meaning of life is",
-    "max_tokens": 64,
-    "temperature": 0.7,
-    "top_k": 40,
-    "top_p": 0.9,
-    "repetition_penalty": 1.1,
-    "stream": false
-  }'
-```
-
-`top_k`, `top_p` and `repetition_penalty` are supported by both completion
-endpoints and are applied per request after temperature scaling.
-
-Useful endpoints:
-
-- `GET /health`
-- `GET /live`
-- `GET /ready`
-- `GET /v1/models`
-- `POST /v1/completions`
-- `POST /v1/chat/completions`
-- `GET /v1/metrics`
-- `GET /v1/monitor`
-- `GET /v1/experts`
-
-CORS is enabled so the two Hugging Face Space endpoints can be called by the
-Complexity website.
-
-### Rolling chat context
-
-`POST /v1/chat/completions` manages long conversations automatically. Before
-generation, the server measures the fully rendered prompt with the model's
-tokenizer and enforces:
-
-```text
-prompt_tokens + max_tokens <= max_seq_len
-```
-
-When the conversation does not fit, the server keeps system instructions and
-the two newest user turns, converts older turns into a deterministic extractive
-summary, then removes the oldest unrepresented messages. An oversized essential
-message is reduced to a head-and-tail view as a final fallback. This processing
-is local and does not trigger a second model request.
-
-Use `--context-compact-tokens N` to compact earlier than the physical context
-limit. For example, `--context-compact-tokens 1024` starts rolling compaction
-once the rendered chat prompt exceeds 1,024 tokens while preserving the
-separate output-token reservation.
-
-Every non-streaming chat response includes `context_metrics`; streaming
-responses expose the same object in the first SSE event:
-
-```json
-{
-  "context_metrics": {
-    "policy": "rolling_summary",
-    "compressed": true,
-    "original_tokens": 3184,
-    "prompt_tokens": 1792,
-    "summary_tokens": 143,
-    "tokens_saved": 1392,
-    "retained_messages": 5,
-    "summarized_messages": 4,
-    "dropped_messages": 9
-  }
-}
-```
-
-Aggregate measurements are available under `context` in `GET /v1/metrics` and
-`GET /v1/monitor`. Send `"context_management": false` to disable compression
-for a request; an over-budget request is then rejected instead of shortened.
-Raw completions, batches and WebSocket completions always receive the same
-exact total-token validation.
-
-## Verify
-
-```bash
-tr-hash-i64 list
+python -m pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-The loader reports missing and unloaded tensors. Release validation uses a
-strict load plus a real cached generation for both 306.5M checkpoints.
+Useful CLI discovery:
+
+```bash
+tr-hash-i64 --help
+tr-hash-i64 serve --help
+tr-hash-i64 service --help
+tr-hash-i64 list
+```
+
+Hardware-specific CUDA validation and raw benchmark results are tracked separately under `benchmarks/results/`.
+
+## License
+
+Apache-2.0, as declared in [`pyproject.toml`](pyproject.toml).
