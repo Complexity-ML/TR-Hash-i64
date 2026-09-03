@@ -324,6 +324,11 @@ async def test_expert_stats_report_real_top2_routes(client, server):
     import torch.nn as nn
     from types import SimpleNamespace
 
+    # The client fixture starts the continuous engine loop. Stop it before
+    # installing a synthetic scheduler snapshot so the test double cannot be
+    # consumed concurrently by engine.step().
+    await server.async_engine.stop()
+
     class RoutedLayer(nn.Module):
         def __init__(self):
             super().__init__()
