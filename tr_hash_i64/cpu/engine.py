@@ -97,37 +97,43 @@ class CPUEngine(I64Engine):
         Converts numpy batch arrays directly to CPU tensors and calls
         model.forward(). No static buffers, no graph runner, no GPU sync.
         """
+        seq_ids, tokens_per_seq = self._prepare_eager_batch(batch)
+        if batch.num_requests == 0:
+            return torch.zeros(0, self.vocab_size)
+
         token_ids = torch.from_numpy(batch.token_ids)
         positions = torch.from_numpy(batch.positions)
-
-        seq_ids = None
-        tokens_per_seq = None
-
-        if self.kv_cache is not None and batch.tokens_per_request is not None:
-            seq_ids = []
-            valid_indices = []
-            for i, rid in enumerate(batch.request_ids):
-                slot = self._request_to_slot.get(int(rid))
-                if slot is None:
-                    logger.error(
-                        "Request %d has no KV slot — skipping from batch", int(rid)
-                    )
-                    continue
-                seq_ids.append(slot)
-                valid_indices.append(i)
-            tokens_per_seq = [batch.tokens_per_request[i] for i in valid_indices]
 
         # ``step()`` mutates scheduler and cache tensors after forward. Using
         # torch.inference_mode() here would tag returned logits as inference
         # tensors and make those downstream in-place updates illegal.
-        with torch.no_grad():
-            logits = self.model(
-                token_ids=token_ids,
-                positions=positions,
-                kv_cache=self.kv_cache,
-                seq_ids=seq_ids,
-                tokens_per_seq=tokens_per_seq,
+        assert self.model is not None
+        model_kwargs = {
+            "token_ids": token_ids,
+            "positions": positions,
+            "kv_cache": self.kv_cache,
+            "seq_ids": seq_ids,
+            "tokens_per_seq": tokens_per_seq,
+        }
+        pixel_values = self._take_batch_pixel_values(batch)
+        if pixel_values is not None and hasattr(self.model, "vision_encoder"):
+            model_kwargs["pixel_values"] = pixel_values
+        if (
+            getattr(self.model, "supports_logits_indices", False)
+            and batch.tokens_per_request is not None
+            and token_ids.shape[0] != batch.num_requests
+        ):
+            offset = 0
+            last_indices = []
+            for token_count in batch.tokens_per_request:
+                offset += int(token_count)
+                last_indices.append(offset - 1)
+            model_kwargs["logits_indices"] = torch.tensor(
+                last_indices,
+                dtype=torch.long,
             )
+        with torch.no_grad():
+            logits = self.model(**model_kwargs)
 
         return logits
 

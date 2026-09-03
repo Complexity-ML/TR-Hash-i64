@@ -126,8 +126,8 @@ def _quantize_cpu_dynamic(model: nn.Module) -> nn.Module:
     )
 
 
-def _fuse_cpu_projection_layers(model: nn.Module) -> int:
-    """Apply inference-only projection fusion after all weights are loaded."""
+def _fuse_projection_layers(model: nn.Module) -> int:
+    """Fuse inference projections before moving the model to its target device."""
 
     fused = 0
     for module in list(model.modules()):
@@ -140,8 +140,18 @@ def _fuse_cpu_projection_layers(model: nn.Module) -> int:
             method = getattr(module, method_name, None)
             if method is not None and method():
                 fused += 1
-    logger.info("CPU projection fusion: %d modules", fused)
+    logger.info("Projection fusion: %d modules", fused)
     return fused
+
+
+def _projection_fusion_allowed(
+    device: str,
+    effective_quant: Optional[str],
+) -> bool:
+    """Fuse only layouts compatible with the later quantization stage."""
+    if effective_quant in ("awq", "gptq"):
+        return False
+    return device == "cpu" or effective_quant in (None, "none")
 
 
 # =========================================================================
@@ -653,8 +663,8 @@ def load_model_by_name(
         # Standard float checkpoint
         load_checkpoint(model, ckpt_path, dtype=dtype, device=device)
 
-    if device == "cpu":
-        _fuse_cpu_projection_layers(model)
+    if _projection_fusion_allowed(device, effective_quant):
+        _fuse_projection_layers(model)
 
     # Post-load quantization (only for float checkpoints, not pre-quantized)
     if effective_quant and effective_quant not in ("none", "awq", "gptq"):

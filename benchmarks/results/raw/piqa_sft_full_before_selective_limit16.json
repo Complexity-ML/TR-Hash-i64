@@ -1,0 +1,51 @@
+{
+  "model": "AETHORIA-AI/TR-HASH-MoE-200M-160B-SFT",
+  "model_dir": "/home/boris/models/TR-HASH-MoE-200M-160B-SFT",
+  "dtype": "float16",
+  "max_seq_len": 256,
+  "max_batch_size": 16,
+  "dataset": "ybisk/piqa",
+  "split": "validation",
+  "cuda": {
+    "gpu": "NVIDIA GeForce RTX 5060 Ti",
+    "torch": "2.11.0+cu128",
+    "runtime": "12.8",
+    "graphs": [
+      1,
+      2,
+      4,
+      8,
+      16
+    ]
+  },
+  "eager": {
+    "mode": "eager",
+    "examples": 16,
+    "accuracy": 0.625,
+    "accuracy_norm": 0.75,
+    "correct": 10,
+    "correct_norm": 12,
+    "choice_tokens": 585,
+    "decode_calls": 553,
+    "decode_forward_steps": 88,
+    "elapsed_seconds": 4.640832464000141,
+    "examples_per_second": 3.4476573166808278,
+    "choice_tokens_per_second": 126.05497064114276
+  },
+  "cuda_graph": {
+    "mode": "cuda_graph",
+    "examples": 16,
+    "accuracy": 0.625,
+    "accuracy_norm": 0.75,
+    "correct": 10,
+    "correct_norm": 12,
+    "choice_tokens": 585,
+    "decode_calls": 553,
+    "decode_forward_steps": 88,
+    "elapsed_seconds": 1.2976813410000432,
+    "examples_per_second": 12.329683331710529,
+    "choice_tokens_per_second": 450.80404681566625
+  },
+  "speedup": 3.5762496672902278,
+  "max_abs_choice_score_diff": 0.026111602783203125
+}

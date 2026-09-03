@@ -19,6 +19,18 @@ from tr_hash_i64.engine.i64_engine import I64Engine
 PIQA_ARCHIVE = "https://storage.googleapis.com/ai2-mosaic/public/physicaliqa/physicaliqa-train-dev.zip"
 
 
+def _prefill_last_logits(model, model_kwargs, last_indices):
+    """Project only final context rows when the model supports selection."""
+    if getattr(model, "supports_logits_indices", False):
+        logits_indices = torch.tensor(
+            last_indices,
+            dtype=torch.long,
+            device=model_kwargs["token_ids"].device,
+        )
+        return model(logits_indices=logits_indices, **model_kwargs)
+    return model(**model_kwargs)[last_indices]
+
+
 def load_piqa_validation(cache_dir: Path):
     """Load the official PIQA dev examples without the retired HF dataset script."""
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -39,6 +51,7 @@ def load_piqa_validation(cache_dir: Path):
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--model-dir", required=True)
+    p.add_argument("--model-id", required=True)
     p.add_argument("--limit", type=int, default=0, help="0 means full validation split")
     p.add_argument("--output", default="piqa_cuda_graph_results.json")
     p.add_argument("--dtype", choices=("float16", "bfloat16"), default="float16")
@@ -109,19 +122,22 @@ class ChoiceScorer:
         ctx_lengths = [len(ctx) for ctx, _ in encoded]
         flat_ctx = [token for ctx, _ in encoded for token in ctx]
         flat_pos = [position for ctx, _ in encoded for position in range(len(ctx))]
-        logits_all = self.model(
-            token_ids=torch.tensor(flat_ctx, dtype=torch.int64, device="cuda"),
-            positions=torch.tensor(flat_pos, dtype=torch.int32, device="cuda"),
-            kv_cache=cache,
-            seq_ids=list(range(batch_size)),
-            tokens_per_seq=ctx_lengths,
-        )
         last_indices = []
         offset = 0
         for length in ctx_lengths:
             last_indices.append(offset + length - 1)
             offset += length
-        logits_by_seq = logits_all[last_indices]
+        logits_by_seq = _prefill_last_logits(
+            self.model,
+            {
+                "token_ids": torch.tensor(flat_ctx, dtype=torch.int64, device="cuda"),
+                "positions": torch.tensor(flat_pos, dtype=torch.int32, device="cuda"),
+                "kv_cache": cache,
+                "seq_ids": list(range(batch_size)),
+                "tokens_per_seq": ctx_lengths,
+            },
+            last_indices,
+        )
         scores = torch.zeros(batch_size, dtype=torch.float32, device="cuda")
         cont_lengths = [len(cont) for _, cont in encoded]
         decode_calls = 0
@@ -223,7 +239,7 @@ def run_mode(scorer, rows, use_graph: bool):
 def main():
     args = parse_args()
     dtype = torch.float16 if args.dtype == "float16" else torch.bfloat16
-    rows = load_piqa_validation(Path("/workspace/datasets/piqa"))
+    rows = load_piqa_validation(Path.home() / ".cache" / "tr_hash_i64" / "piqa")
     if args.limit > 0:
         rows = rows[: args.limit]
     scorer = ChoiceScorer(args.model_dir, dtype, args.max_seq_len, args.max_batch_size)
@@ -242,7 +258,7 @@ def main():
         (row["goal"], solution)
         for row in rows[: min(8, len(rows))]
         for solution in (row["sol1"], row["sol2"])
-    ]
+    ][: args.max_batch_size]
     scorer.score_batch(warmup_pairs, False)
     scorer.score_batch(warmup_pairs, True)
 
@@ -253,7 +269,7 @@ def main():
         for a, b in zip(eager.pop("scores"), graph.pop("scores"))
     ]
     result = {
-        "model": "AETHORIA-AI/TR-HASH-200M-130B",
+        "model": args.model_id,
         "model_dir": args.model_dir,
         "dtype": args.dtype,
         "max_seq_len": args.max_seq_len,

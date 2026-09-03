@@ -1119,10 +1119,73 @@ class I64Engine:
 
         return result
 
+    def _prepare_eager_batch(
+        self,
+        batch: I64Batch,
+    ) -> tuple[Optional[List[int]], Optional[List[int]]]:
+        """Filter slotless requests before tensorization and return KV metadata."""
+        if self.kv_cache is None or batch.tokens_per_request is None:
+            return None, None
+
+        seq_ids = []
+        valid_indices = []
+        for index, request_id in enumerate(batch.request_ids):
+            slot = self._request_to_slot.get(int(request_id))
+            if slot is None:
+                logger.error(
+                    "Request %d has no KV slot — skipping from batch",
+                    int(request_id),
+                )
+                continue
+            seq_ids.append(slot)
+            valid_indices.append(index)
+
+        if len(valid_indices) < batch.num_requests:
+            original_count = batch.num_requests
+            valid_requests = np.zeros(original_count, dtype=bool)
+            valid_requests[valid_indices] = True
+            token_mask = np.repeat(
+                valid_requests,
+                batch.tokens_per_request.astype(np.intp, copy=False),
+            )
+            batch.token_ids = batch.token_ids[token_mask]
+            batch.positions = batch.positions[token_mask]
+            batch.expert_ids = batch.expert_ids[token_mask]
+            batch.request_ids = batch.request_ids[valid_requests]
+            batch.is_prefill = batch.is_prefill[valid_requests]
+            batch.seq_lens = batch.seq_lens[valid_requests]
+            batch.kv_block_table = batch.kv_block_table[valid_requests]
+            batch.tokens_per_request = batch.tokens_per_request[valid_requests]
+            logger.warning(
+                "Filtered batch from %d to %d requests (missing KV slots)",
+                original_count,
+                batch.num_requests,
+            )
+
+        return seq_ids, [int(count) for count in batch.tokens_per_request]
+
+    def _take_batch_pixel_values(self, batch: I64Batch) -> Optional[torch.Tensor]:
+        """Consume and combine image tensors for prefill requests in ``batch``."""
+        if not batch.is_prefill.any() or not self._request_pixel_values:
+            return None
+
+        pixel_values = []
+        for request_id in batch.request_ids:
+            value = self._request_pixel_values.pop(int(request_id), None)
+            if value is not None:
+                pixel_values.append(value)
+        if not pixel_values:
+            return None
+        return torch.cat(pixel_values, dim=0).to(self.device)
+
     def _model_forward(self, batch: I64Batch) -> torch.Tensor:
         """
         Run model forward pass with KV cache support.
         """
+        seq_ids, tokens_per_seq = self._prepare_eager_batch(batch)
+        if batch.num_requests == 0:
+            return torch.zeros(0, self.vocab_size, device=self.device)
+
         n = batch.token_ids.shape[0]
         if n <= self._buf_token_ids.shape[0]:
             self._buf_token_ids[:n].copy_(torch.from_numpy(batch.token_ids))
@@ -1132,46 +1195,6 @@ class I64Engine:
         else:
             token_ids = torch.from_numpy(batch.token_ids).to(self.device)
             positions = torch.from_numpy(batch.positions).to(self.device)
-
-        # Build KV cache metadata
-        seq_ids = None
-        tokens_per_seq = None
-
-        if self.kv_cache is not None and batch.tokens_per_request is not None:
-            seq_ids = []
-            valid_indices = []
-            for i, rid in enumerate(batch.request_ids):
-                slot = self._request_to_slot.get(int(rid))
-                if slot is None:
-                    logger.error("Request %d has no KV slot — skipping from batch", int(rid))
-                    continue
-                seq_ids.append(slot)
-                valid_indices.append(i)
-            tokens_per_seq = [batch.tokens_per_request[i] for i in valid_indices]
-
-            # Filter batch inputs to match valid KV slots (prevents shape mismatch)
-            if len(valid_indices) < len(batch.request_ids):
-                orig_count = len(batch.request_ids)
-                if len(valid_indices) == 0:
-                    logger.error("No valid KV slots in batch — skipping forward pass")
-                    return torch.zeros(0, self.model.config.vocab_size if hasattr(self.model, 'config') else 1, device=self.device)
-                # Build per-token mask from tokens_per_request
-                valid_set = set(valid_indices)
-                token_mask = []
-                for i, tpr in enumerate(batch.tokens_per_request):
-                    token_mask.extend([i in valid_set] * int(tpr))
-                token_mask = np.array(token_mask, dtype=bool)
-                req_mask = np.array([i in valid_set for i in range(orig_count)], dtype=bool)
-                batch.token_ids = batch.token_ids[token_mask]
-                batch.positions = batch.positions[token_mask]
-                batch.expert_ids = batch.expert_ids[token_mask]
-                batch.request_ids = batch.request_ids[req_mask]
-                batch.is_prefill = batch.is_prefill[req_mask]
-                batch.seq_lens = batch.seq_lens[req_mask]
-                batch.kv_block_table = batch.kv_block_table[req_mask]
-                batch.tokens_per_request = np.array(tokens_per_seq, dtype=batch.tokens_per_request.dtype)
-                logger.warning("Filtered batch from %d to %d requests (missing KV slots)",
-                               orig_count, len(valid_indices))
 
         # CUDA graph for pure decode batches. Now supports KV cache via
         # model.decode_step() which uses tensor-only KV writes (graph-safe).
@@ -1186,6 +1209,7 @@ class I64Engine:
 
         with torch.no_grad():
             if use_graph:
+                assert seq_ids is not None
                 # Enter graph mode: copy block_table + seqlens to static buffers
                 self.kv_cache.enter_graph_mode(seq_ids)
 
@@ -1213,18 +1237,7 @@ class I64Engine:
                 for sid in seq_ids:
                     self.kv_cache._touch(sid)
             else:
-                # Collect pixel_values for VLM prefill requests
-                pixel_values = None
-                if batch.is_prefill.any() and self._request_pixel_values:
-                    import torch as _torch
-                    pv_list = []
-                    for rid in batch.request_ids:
-                        rid_int = int(rid)
-                        if rid_int in self._request_pixel_values:
-                            pv = self._request_pixel_values.pop(rid_int)
-                            pv_list.append(pv)
-                    if pv_list:
-                        pixel_values = _torch.cat(pv_list, dim=0).to(self.device)
+                pixel_values = self._take_batch_pixel_values(batch)
 
                 # Pass pixel_values if model supports it (VLM)
                 fwd_kwargs = dict(
@@ -1234,6 +1247,21 @@ class I64Engine:
                     seq_ids=seq_ids,
                     tokens_per_seq=tokens_per_seq,
                 )
+                if (
+                    getattr(self.model, "supports_logits_indices", False)
+                    and batch.tokens_per_request is not None
+                    and token_ids.shape[0] != batch.num_requests
+                ):
+                    last_indices = []
+                    offset = 0
+                    for token_count in batch.tokens_per_request:
+                        offset += int(token_count)
+                        last_indices.append(offset - 1)
+                    fwd_kwargs["logits_indices"] = torch.tensor(
+                        last_indices,
+                        dtype=torch.long,
+                        device=token_ids.device,
+                    )
                 if pixel_values is not None and hasattr(self.model, 'vision_encoder'):
                     fwd_kwargs["pixel_values"] = pixel_values
 

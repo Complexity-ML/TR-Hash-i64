@@ -1,0 +1,150 @@
+{
+  "schema_version": 1,
+  "benchmark": "benchmarks/bench_piqa_cuda_graph.py",
+  "date": "2026-09-03",
+  "host": "tr-hash-server",
+  "gpu": {
+    "name": "NVIDIA GeForce RTX 5060 Ti",
+    "uuid": "GPU-757192a7-6497-c48a-1543-12b92e74ee41",
+    "power_limit_w": 150,
+    "compute_capability": "12.0"
+  },
+  "runtime": {
+    "pytorch": "2.11.0+cu128",
+    "cuda": "12.8"
+  },
+  "model": {
+    "id": "AETHORIA-AI/TR-HASH-MoE-200M-160B-SFT",
+    "weights_sha256": "5aeb736c897373ace818a46df92edf81c9bf688723c20d1a31ed31f02028a758"
+  },
+  "dense_topk_comparison": {
+    "scope": "dense top-k expert dispatch implementation only",
+    "baseline_commit": "61d73a42c9d45da0f995d96c4dcfb2a17c09e824",
+    "baseline_file_sha256": "74271db5c0c25e29d7e8195ab4f14e5c9d88dc9fe0cb8bc6e9aef5544a43a0f0",
+    "optimized_file_sha256": "9f4e3e75bcd1e8da192cb04693e29374b3a38a14d8410c28d55d521783504e43",
+    "file": "tr_hash_i64/layers/token_routed_mlp.py",
+    "parameters": {
+      "examples": 32,
+      "choice_tokens": 1448,
+      "dtype": "float16",
+      "max_seq_len": 256,
+      "max_batch_size": 16
+    },
+    "baseline_trials": [
+      {
+        "result_file": "raw/piqa_sft_baseline_run1.json",
+        "cuda_graph_duration_s": 3.300928393999982,
+        "cuda_graph_tokens_per_s": 438.66446864827327,
+        "accuracy": 0.6875,
+        "accuracy_norm": 0.75,
+        "max_abs_eager_graph_score_diff": 0.05877685546875
+      },
+      {
+        "result_file": "raw/piqa_sft_baseline_run2.json",
+        "cuda_graph_duration_s": 3.287395628000013,
+        "cuda_graph_tokens_per_s": 440.4702578742963,
+        "accuracy": 0.6875,
+        "accuracy_norm": 0.75,
+        "max_abs_eager_graph_score_diff": 0.05877685546875
+      },
+      {
+        "result_file": "raw/piqa_sft_baseline_run3.json",
+        "cuda_graph_duration_s": 3.263246003000006,
+        "cuda_graph_tokens_per_s": 443.72995436715695,
+        "accuracy": 0.6875,
+        "accuracy_norm": 0.75,
+        "max_abs_eager_graph_score_diff": 0.05877685546875
+      }
+    ],
+    "optimized_trials": [
+      {
+        "result_file": "raw/piqa_sft_optimized_run1.json",
+        "cuda_graph_duration_s": 3.161921745999962,
+        "cuda_graph_tokens_per_s": 457.9493473650368,
+        "accuracy": 0.6875,
+        "accuracy_norm": 0.75,
+        "max_abs_eager_graph_score_diff": 0.05877685546875
+      },
+      {
+        "result_file": "raw/piqa_sft_optimized_run2.json",
+        "cuda_graph_duration_s": 3.1709343600000466,
+        "cuda_graph_tokens_per_s": 456.6477371042076,
+        "accuracy": 0.6875,
+        "accuracy_norm": 0.75,
+        "max_abs_eager_graph_score_diff": 0.05877685546875
+      },
+      {
+        "result_file": "raw/piqa_sft_optimized_run3.json",
+        "cuda_graph_duration_s": 3.1616719510000166,
+        "cuda_graph_tokens_per_s": 457.98552868269803,
+        "accuracy": 0.6875,
+        "accuracy_norm": 0.75,
+        "max_abs_eager_graph_score_diff": 0.05877685546875
+      }
+    ],
+    "aggregate": {
+      "statistic": "median of 3 trials",
+      "baseline_cuda_graph_duration_s": 3.287395628000013,
+      "optimized_cuda_graph_duration_s": 3.161921745999962,
+      "latency_reduction_percent": 3.816817207254941,
+      "baseline_cuda_graph_tokens_per_s": 440.4702578742963,
+      "optimized_cuda_graph_tokens_per_s": 457.9493473650368,
+      "throughput_gain_percent": 3.9682791694255037,
+      "throughput_ratio": 1.039682791694255,
+      "accuracy_unchanged": true,
+      "normalized_accuracy_unchanged": true,
+      "eager_graph_score_diff_unchanged": true
+    }
+  },
+  "full_upgrade_smoke": {
+    "scope": "CUDA changes exercised by the PIQA scorer: projection fusion, dense top-k reuse, and selective prefill LM-head projection",
+    "trials": 1,
+    "parameters": {
+      "examples": 16,
+      "choice_tokens": 585,
+      "dtype": "float16",
+      "max_seq_len": 256,
+      "max_batch_size": 16
+    },
+    "baseline": {
+      "result_file": "raw/piqa_sft_full_before_selective_limit16.json",
+      "eager_choice_tokens_per_s": 126.05497064114276,
+      "cuda_graph_choice_tokens_per_s": 450.80404681566625,
+      "cuda_graph_elapsed_seconds": 1.2976813410000432,
+      "cuda_graph_vs_eager_speedup": 3.5762496672902278,
+      "max_abs_eager_graph_score_diff": 0.026111602783203125,
+      "accuracy": 0.625,
+      "accuracy_norm": 0.75
+    },
+    "optimized": {
+      "result_file": "raw/piqa_sft_full_after_selective_limit16.json",
+      "eager_choice_tokens_per_s": 124.98869154130958,
+      "cuda_graph_choice_tokens_per_s": 448.6939000327923,
+      "cuda_graph_elapsed_seconds": 1.3037841609998395,
+      "cuda_graph_vs_eager_speedup": 3.5898759679750394,
+      "max_abs_eager_graph_score_diff": 0.026111602783203125,
+      "accuracy": 0.625,
+      "accuracy_norm": 0.75
+    },
+    "result": {
+      "eager_throughput_change_percent": -0.8458842157590851,
+      "cuda_graph_throughput_change_percent": -0.4680851464797908,
+      "cuda_graph_latency_change_percent": 0.4702864876744872,
+      "accuracy_unchanged": true,
+      "normalized_accuracy_unchanged": true,
+      "eager_graph_score_diff_unchanged": true,
+      "note": "Single-run full-path smoke is within run-to-run noise and does not establish an aggregate gain. The three-trial dense-top-k comparison is the statistically stronger CUDA measurement."
+    }
+  },
+  "final_rebased_cuda_graph_smoke": {
+    "result_file": "raw/piqa_sft_final_rebased_cuda_smoke.json",
+    "examples": 4,
+    "eager_choice_tokens_per_s": 81.22839352425221,
+    "cuda_graph_choice_tokens_per_s": 335.64136373872134,
+    "cuda_graph_vs_eager_speedup": 4.132069454734562,
+    "accuracy_unchanged": true,
+    "normalized_accuracy_unchanged": true,
+    "max_abs_eager_graph_score_diff": 0.034454345703125,
+    "note": "Validation after integrating origin/main graph_safe_mode changes."
+  }
+}

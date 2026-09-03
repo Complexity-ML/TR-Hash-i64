@@ -22,8 +22,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tr_hash_i64.engine.i64_engine import I64Engine, GenerationResult, AdaptiveBatchSizer
 from tr_hash_i64.engine.i64_scheduler import I64Scheduler, I64Request, I64Batch
+from tr_hash_i64.cpu.engine import CPUEngine
 from tr_hash_i64.core.kv_cache import PagedKVCache
 from tr_hash_i64.core.sampling import SamplingParams
+from tr_hash_i64.parallel.disaggregated import PrefillWorker
 
 
 # =====================================================================
@@ -159,6 +161,242 @@ class TestAdaptiveBatchSizer:
         for i in range(10):
             sizer.record(100, 10.0)
         assert len(sizer._throughputs) == 5
+
+
+class TestPrefillLogitsProjection:
+    def test_engine_requests_only_last_prefill_logits(self):
+        class RecordingModel:
+            supports_logits_indices = True
+
+            def __init__(self):
+                self.logits_indices = None
+
+            def __call__(self, token_ids, logits_indices=None, **kwargs):
+                self.logits_indices = logits_indices
+                logits = torch.arange(
+                    token_ids.numel() * 11,
+                    dtype=torch.float32,
+                ).reshape(token_ids.numel(), 11)
+                if logits_indices is not None:
+                    logits = logits.index_select(0, logits_indices)
+                return logits
+
+        model = RecordingModel()
+        engine = I64Engine(
+            model=model,
+            num_experts=4,
+            vocab_size=11,
+            max_batch_size=3,
+            max_seq_len=8,
+            device="cpu",
+        )
+        batch = I64Batch(
+            request_ids=np.array([10, 11, 12], dtype=np.int64),
+            token_ids=np.arange(8, dtype=np.int64),
+            expert_ids=np.zeros(8, dtype=np.int32),
+            seq_lens=np.array([3, 1, 4], dtype=np.int32),
+            positions=np.array([0, 1, 2, 0, 0, 1, 2, 3], dtype=np.int32),
+            kv_block_table=np.zeros((3, 1), dtype=np.int32),
+            is_prefill=np.ones(3, dtype=np.int32),
+            tokens_per_request=np.array([3, 1, 4], dtype=np.int32),
+        )
+
+        logits = engine._model_forward(batch)
+
+        assert model.logits_indices is not None
+        assert model.logits_indices.tolist() == [2, 3, 7]
+        assert logits.shape == (3, 11)
+
+    def test_cpu_engine_requests_only_last_prefill_logits(self):
+        class RecordingModel:
+            supports_logits_indices = True
+
+            def __init__(self):
+                self.logits_indices = None
+
+            def __call__(self, token_ids, logits_indices=None, **_kwargs):
+                self.logits_indices = logits_indices
+                logits = torch.arange(token_ids.numel() * 7).reshape(
+                    token_ids.numel(), 7
+                )
+                if logits_indices is not None:
+                    logits = logits.index_select(0, logits_indices)
+                return logits
+
+        model = RecordingModel()
+        engine = CPUEngine(
+            model=model,
+            num_experts=2,
+            vocab_size=7,
+            max_batch_size=2,
+            max_seq_len=8,
+        )
+        batch = I64Batch(
+            request_ids=np.array([1, 2], dtype=np.int64),
+            token_ids=np.arange(5, dtype=np.int64),
+            expert_ids=np.zeros(5, dtype=np.int32),
+            seq_lens=np.array([2, 3], dtype=np.int32),
+            positions=np.array([0, 1, 0, 1, 2], dtype=np.int32),
+            kv_block_table=np.zeros((2, 1), dtype=np.int32),
+            is_prefill=np.ones(2, dtype=np.int32),
+            tokens_per_request=np.array([2, 3], dtype=np.int32),
+        )
+
+        logits = engine._model_forward(batch)
+
+        assert model.logits_indices is not None
+        assert model.logits_indices.tolist() == [1, 4]
+        assert logits.shape == (2, 7)
+
+    @pytest.mark.parametrize("engine_cls", [I64Engine, CPUEngine])
+    def test_eager_forward_filters_slotless_requests_before_tensorization(
+        self,
+        engine_cls,
+    ):
+        class RecordingModel:
+            supports_logits_indices = True
+
+            def __init__(self):
+                self.forwarded = None
+
+            def __call__(
+                self,
+                token_ids,
+                positions,
+                seq_ids,
+                tokens_per_seq,
+                logits_indices=None,
+                **_kwargs,
+            ):
+                assert logits_indices is not None
+                self.forwarded = {
+                    "token_ids": token_ids.tolist(),
+                    "positions": positions.tolist(),
+                    "seq_ids": seq_ids,
+                    "tokens_per_seq": tokens_per_seq,
+                    "logits_indices": logits_indices.tolist(),
+                }
+                return torch.zeros(len(logits_indices), 7)
+
+        model = RecordingModel()
+        engine = engine_cls(
+            model=model,
+            num_experts=2,
+            vocab_size=7,
+            max_batch_size=2,
+            max_seq_len=8,
+            **({"device": "cpu"} if engine_cls is I64Engine else {}),
+        )
+        engine.kv_cache = SimpleNamespace()
+        engine._request_to_slot = {1: 0}
+        batch = I64Batch(
+            request_ids=np.array([1, 2], dtype=np.int64),
+            token_ids=np.array([10, 11, 20, 21, 22], dtype=np.int64),
+            expert_ids=np.zeros(5, dtype=np.int32),
+            seq_lens=np.array([2, 3], dtype=np.int32),
+            positions=np.array([0, 1, 0, 1, 2], dtype=np.int32),
+            kv_block_table=np.zeros((2, 1), dtype=np.int32),
+            is_prefill=np.ones(2, dtype=np.int32),
+            tokens_per_request=np.array([2, 3], dtype=np.int32),
+        )
+
+        engine._model_forward(batch)
+
+        assert model.forwarded == {
+            "token_ids": [10, 11],
+            "positions": [0, 1],
+            "seq_ids": [0],
+            "tokens_per_seq": [2],
+            "logits_indices": [1],
+        }
+        assert batch.request_ids.tolist() == [1]
+        assert batch.tokens_per_request.tolist() == [2]
+
+    def test_cpu_engine_forwards_prefill_pixel_values_once(self):
+        class RecordingVisionModel:
+            vision_encoder = object()
+
+            def __init__(self):
+                self.pixel_values = None
+
+            def __call__(self, token_ids, pixel_values=None, **_kwargs):
+                self.pixel_values = pixel_values
+                return torch.zeros(token_ids.numel(), 7)
+
+        model = RecordingVisionModel()
+        engine = CPUEngine(
+            model=model,
+            num_experts=2,
+            vocab_size=7,
+            max_batch_size=1,
+            max_seq_len=8,
+        )
+        expected = torch.arange(6).reshape(1, 2, 3)
+        engine._request_pixel_values[1] = expected
+        batch = I64Batch(
+            request_ids=np.array([1], dtype=np.int64),
+            token_ids=np.array([10, 11], dtype=np.int64),
+            expert_ids=np.zeros(2, dtype=np.int32),
+            seq_lens=np.array([2], dtype=np.int32),
+            positions=np.array([0, 1], dtype=np.int32),
+            kv_block_table=np.zeros((1, 1), dtype=np.int32),
+            is_prefill=np.ones(1, dtype=np.int32),
+            tokens_per_request=np.array([2], dtype=np.int32),
+        )
+
+        engine._model_forward(batch)
+
+        assert torch.equal(model.pixel_values, expected)
+        assert 1 not in engine._request_pixel_values
+
+    def test_disaggregated_worker_requests_only_final_prompt_logits(self):
+        class RecordingModel:
+            supports_logits_indices = True
+            config = SimpleNamespace(
+                num_hidden_layers=1,
+                num_key_value_heads=1,
+                head_dim=4,
+            )
+
+            def __init__(self):
+                self.logits_indices = None
+
+            def __call__(self, token_ids, logits_indices=None, **_kwargs):
+                self.logits_indices = logits_indices
+                logits = torch.arange(
+                    token_ids.numel() * 5,
+                    dtype=torch.float32,
+                ).reshape(token_ids.numel(), 5)
+                if logits_indices is not None:
+                    logits = logits.index_select(0, logits_indices)
+                return logits
+
+        class FakeCache:
+            max_seqs = 1
+            block_size = 4
+            block_table = torch.tensor([[0]])
+
+            def allocate_blocks(self, _seq_id, _num_blocks):
+                return [0]
+
+            def free_sequence(self, _seq_id):
+                return None
+
+        class FakeTransfer:
+            def send_kv(self, _metadata, _cache):
+                return None
+
+            def get_stats(self):
+                return {}
+
+        model = RecordingModel()
+        worker = PrefillWorker(model, FakeCache(), FakeTransfer(), device="cpu")
+
+        first_token = worker.run_prefill(7, [2, 3, 4])
+
+        assert first_token == 4
+        assert model.logits_indices is not None
+        assert model.logits_indices.tolist() == [2]
 
 
 class TestSlotPool:

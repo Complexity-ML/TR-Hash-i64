@@ -393,14 +393,21 @@ class PrefillWorker:
         positions = torch.arange(prompt_len, dtype=torch.long, device=self.device)
 
         # 3. Run model forward (prefill — the compute-bound step)
-        with torch.no_grad():
-            logits = self.model(
-                token_ids=token_ids,
-                positions=positions,
-                kv_cache=self.kv_cache,
-                seq_ids=[seq_id],
-                tokens_per_seq=[prompt_len],
+        model_kwargs = {
+            "token_ids": token_ids,
+            "positions": positions,
+            "kv_cache": self.kv_cache,
+            "seq_ids": [seq_id],
+            "tokens_per_seq": [prompt_len],
+        }
+        if getattr(self.model, "supports_logits_indices", False):
+            model_kwargs["logits_indices"] = torch.tensor(
+                [prompt_len - 1],
+                dtype=torch.long,
+                device=token_ids.device,
             )
+        with torch.no_grad():
+            logits = self.model(**model_kwargs)
 
         # 4. Sample first token (greedy or temperature-based)
         #    logits shape: (prompt_len, vocab) or (1, vocab) — take last position

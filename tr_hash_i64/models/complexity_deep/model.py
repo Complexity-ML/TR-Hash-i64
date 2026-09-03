@@ -359,6 +359,8 @@ class ComplexityDecoderLayer(nn.Module):
 # =========================================================================
 
 class ComplexityDeepModel(nn.Module):
+    supports_logits_indices = True
+
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -368,7 +370,8 @@ class ComplexityDeepModel(nn.Module):
         self.tie_word_embeddings = getattr(config, 'tie_word_embeddings', True)
 
     def forward(self, token_ids, positions=None,
-                kv_cache=None, seq_ids=None, tokens_per_seq=None, **kwargs):
+                kv_cache=None, seq_ids=None, tokens_per_seq=None,
+                logits_indices=None, **kwargs):
         """
         Engine-compatible forward.
 
@@ -378,6 +381,7 @@ class ComplexityDeepModel(nn.Module):
             kv_cache: PagedKVCache or None
             seq_ids: list of sequence IDs
             tokens_per_seq: list of token counts per sequence
+            logits_indices: optional rows to project through the LM head
         """
         if token_ids.dim() == 2:
             # Standalone mode: [batch, seq_len] -> flatten
@@ -405,6 +409,8 @@ class ComplexityDeepModel(nn.Module):
             )
 
         hidden = self.norm(hidden)
+        if logits_indices is not None:
+            hidden = hidden.index_select(0, logits_indices)
 
         if self.tie_word_embeddings:
             logits = F.linear(hidden.float(), self.embed_tokens.weight.float())

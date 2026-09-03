@@ -188,8 +188,22 @@ class TokenRoutedMLP(nn.Module):
 
     def forward(self, x, token_ids=None, **kwargs):
         routes = self.route(token_ids, x.shape[0], x.device)
-        output = self.primary_weight * self.expert_forward(x, routes[0])
-        if self.top_k > 1:
+        dense_dispatch = (
+            is_graph_safe_mode() or x.device.type == "mps"
+        )
+        combined_sparse_dispatch = (
+            x.device.type == "cpu"
+            and self.top_k > 1
+            and x.shape[0] >= 4
+            and self._experts_support_combined_sparse_dispatch()
+        )
+        if dense_dispatch and self.top_k > 1:
+            output = self._dense_topk_expert_forward(x, routes)
+        elif combined_sparse_dispatch:
+            output = self._sparse_topk_expert_forward(x, routes)
+        else:
+            output = self.primary_weight * self.expert_forward(x, routes[0])
+        if self.top_k > 1 and not dense_dispatch and not combined_sparse_dispatch:
             secondary_weight = (1.0 - self.primary_weight) / (self.top_k - 1)
             for route_idx in range(1, self.top_k):
                 output = output + secondary_weight * self.expert_forward(
@@ -219,6 +233,67 @@ class TokenRoutedMLP(nn.Module):
         else:
             output = self.routed_output_scale * output
 
+        return output
+
+    def _experts_support_combined_sparse_dispatch(self) -> bool:
+        """Return false when dynamic activation quantization is batch-sensitive."""
+        if not hasattr(self, "expert_gate_up"):
+            return True
+        return all(isinstance(layer, nn.Linear) for layer in self.expert_gate_up)
+
+    def _sparse_topk_expert_forward(
+        self,
+        x: torch.Tensor,
+        routes: torch.Tensor,
+    ) -> torch.Tensor:
+        """Dispatch every sparse CPU top-k route in one expert pass."""
+        route_inputs = x.unsqueeze(0).expand(self.top_k, -1, -1).reshape(
+            self.top_k * x.shape[0],
+            x.shape[1],
+        )
+        route_outputs = self.expert_forward(
+            route_inputs,
+            routes.reshape(-1),
+        ).reshape(self.top_k, x.shape[0], x.shape[1])
+
+        output = self.primary_weight * route_outputs[0]
+        secondary_weight = (1.0 - self.primary_weight) / (self.top_k - 1)
+        if self.top_k > 1:
+            output = output + secondary_weight * route_outputs[1:].sum(dim=0)
+        return output
+
+    def _dense_topk_expert_forward(
+        self,
+        x: torch.Tensor,
+        routes: torch.Tensor,
+    ) -> torch.Tensor:
+        """Reuse fixed-shape expert outputs across every top-k route."""
+        expert_outputs = []
+        for e in range(self.num_experts):
+            if hasattr(self, "expert_gate_up"):
+                gate_e, up_e = self.expert_gate_up[e](x).chunk(2, dim=-1)
+                out_e = self.expert_down[e](F.silu(gate_e) * up_e)
+            elif hasattr(self, "gate_up_proj_w"):
+                gate_e, up_e = (x @ self.gate_up_proj_w[e]).chunk(2, dim=-1)
+                out_e = (F.silu(gate_e) * up_e) @ self.down_proj_w[e]
+            else:
+                gate_e = x @ self.gate_proj_w[e]
+                up_e = x @ self.up_proj_w[e]
+                out_e = (F.silu(gate_e) * up_e) @ self.down_proj_w[e]
+            expert_outputs.append(out_e)
+
+        routed_outputs = []
+        for route_idx in range(self.top_k):
+            route_output = torch.zeros_like(x)
+            for e, out_e in enumerate(expert_outputs):
+                mask = (routes[route_idx] == e).unsqueeze(-1).to(route_output.dtype)
+                route_output = route_output + out_e.to(route_output.dtype) * mask
+            routed_outputs.append(all_reduce(route_output))
+
+        output = self.primary_weight * routed_outputs[0]
+        secondary_weight = (1.0 - self.primary_weight) / (self.top_k - 1)
+        for route_idx in range(1, self.top_k):
+            output = output + secondary_weight * routed_outputs[route_idx]
         return output
 
     def fuse_shared_gate_up(self) -> bool:

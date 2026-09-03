@@ -188,6 +188,26 @@ class TestComplexityDeepModel:
             logits = dense_model(ids)
         assert logits.shape == (5, 256)
 
+    def test_projects_only_requested_logits(self, moe_model):
+        ids = torch.randint(0, 256, (8,))
+        positions = torch.tensor([0, 1, 2, 0, 0, 1, 2, 3])
+        last_indices = torch.tensor([2, 3, 7])
+
+        with torch.no_grad():
+            full_logits = moe_model(
+                ids,
+                positions=positions,
+                tokens_per_seq=[3, 1, 4],
+            )
+            selected_logits = moe_model(
+                ids,
+                positions=positions,
+                tokens_per_seq=[3, 1, 4],
+                logits_indices=last_indices,
+            )
+
+        torch.testing.assert_close(selected_logits, full_logits[last_indices])
+
     def test_num_parameters(self, moe_model):
         assert moe_model.num_parameters() > 0
 
@@ -197,6 +217,138 @@ class TestComplexityDeepModel:
             logits1 = moe_model(ids)
             logits2 = moe_model(ids)
         assert torch.allclose(logits1, logits2)
+
+
+class TestDenseTopKExpertDispatch:
+    def test_matches_independent_route_dispatch(self, moe_config):
+        moe_config.top_k = 2
+        moe_model = ComplexityDeepModel(moe_config).eval()
+        mlp = moe_model.layers[0].mlp
+        hidden = torch.randn(7, moe_model.config.hidden_size)
+        token_ids = torch.tensor([1, 5, 8, 13, 21, 34, 55])
+        routes = mlp.route(token_ids, hidden.shape[0], hidden.device)
+        secondary_weight = (1.0 - mlp.primary_weight) / (mlp.top_k - 1)
+
+        with torch.no_grad():
+            expected = mlp.primary_weight * mlp._dense_expert_forward(
+                hidden,
+                routes[0],
+            )
+            for route_idx in range(1, mlp.top_k):
+                expected = expected + secondary_weight * mlp._dense_expert_forward(
+                    hidden,
+                    routes[route_idx],
+                )
+            actual = mlp._dense_topk_expert_forward(hidden, routes)
+
+        assert torch.equal(actual, expected)
+
+    def test_graph_safe_context_reuses_topk_expert_outputs(
+        self,
+        moe_config,
+        monkeypatch,
+    ):
+        from tr_hash_i64.core.graph_context import graph_safe_mode
+
+        moe_config.top_k = 2
+        mlp = ComplexityDeepModel(moe_config).eval().layers[0].mlp
+        hidden = torch.randn(7, moe_config.hidden_size)
+        token_ids = torch.arange(hidden.shape[0])
+        calls = 0
+        original = mlp._dense_topk_expert_forward
+
+        def recording_dense_topk(x, routes):
+            nonlocal calls
+            calls += 1
+            return original(x, routes)
+
+        monkeypatch.setattr(mlp, "_dense_topk_expert_forward", recording_dense_topk)
+        with torch.no_grad(), graph_safe_mode():
+            mlp(hidden, token_ids=token_ids)
+
+        assert calls == 1
+
+
+class TestSparseTopKCPUDispatch:
+    @pytest.mark.parametrize("top_k", [2, 4])
+    @pytest.mark.parametrize("materialized", [False, True])
+    def test_combined_routes_match_independent_dispatch(
+        self,
+        moe_config,
+        top_k,
+        materialized,
+    ):
+        moe_config.top_k = top_k
+        mlp = ComplexityDeepModel(moe_config).eval().layers[0].mlp
+        if materialized:
+            mlp.materialize_expert_linears()
+        hidden = torch.randn(13, moe_config.hidden_size)
+        token_ids = torch.arange(hidden.shape[0])
+        routes = mlp.route(token_ids, hidden.shape[0], hidden.device)
+        secondary_weight = (1.0 - mlp.primary_weight) / (top_k - 1)
+
+        with torch.no_grad():
+            expected = mlp.primary_weight * mlp.expert_forward(hidden, routes[0])
+            for route_index in range(1, top_k):
+                expected = expected + secondary_weight * mlp.expert_forward(
+                    hidden,
+                    routes[route_index],
+                )
+            actual = mlp._sparse_topk_expert_forward(hidden, routes)
+
+        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+
+    def test_cpu_prefill_combines_topk_routes_into_one_dispatch(
+        self,
+        moe_config,
+        monkeypatch,
+    ):
+        moe_config.top_k = 3
+        mlp = ComplexityDeepModel(moe_config).eval().layers[0].mlp
+        hidden = torch.randn(8, moe_config.hidden_size)
+        token_ids = torch.arange(hidden.shape[0])
+        calls = 0
+        original = mlp.expert_forward
+
+        def recording_expert_forward(x, expert_ids):
+            nonlocal calls
+            calls += 1
+            return original(x, expert_ids)
+
+        monkeypatch.setattr(mlp, "expert_forward", recording_expert_forward)
+
+        with torch.no_grad():
+            mlp(hidden, token_ids=token_ids)
+
+        assert calls == 1
+
+    def test_dynamic_int8_keeps_independent_route_dispatch(
+        self,
+        moe_config,
+        monkeypatch,
+    ):
+        from tr_hash_i64.core.loader import _quantize_cpu_dynamic
+
+        moe_config.top_k = 2
+        mlp = ComplexityDeepModel(moe_config).eval().layers[0].mlp
+        mlp.materialize_expert_linears()
+        mlp = _quantize_cpu_dynamic(mlp)
+        hidden = torch.randn(16, moe_config.hidden_size)
+        token_ids = torch.arange(hidden.shape[0])
+        calls = 0
+        original = mlp.expert_forward
+
+        def recording_expert_forward(x, expert_ids):
+            nonlocal calls
+            calls += 1
+            return original(x, expert_ids)
+
+        monkeypatch.setattr(mlp, "expert_forward", recording_expert_forward)
+
+        with torch.no_grad():
+            mlp(hidden, token_ids=token_ids)
+
+        assert calls == mlp.top_k
 
 
 # ── decode_step (CUDA-graph-safe decode path) ──

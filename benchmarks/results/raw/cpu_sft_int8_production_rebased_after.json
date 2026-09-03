@@ -1,0 +1,24 @@
+{
+  "model": "AETHORIA-AI/TR-HASH-MoE-200M-160B-SFT",
+  "model_dir": "/home/boris/models/TR-HASH-MoE-200M-160B-SFT",
+  "checkpoint_sha256": "fb66baf5bb567eb5a73ce7e53b5d351a0963356808d41af904d776d50428e327",
+  "device": "cpu",
+  "quantization": "int8",
+  "threads": 8,
+  "prompt_len": 128,
+  "repeats": 9,
+  "supports_logits_indices": true,
+  "median_ms": 143.40442499997152,
+  "trials_ms": [
+    143.20722599950386,
+    143.1050179999147,
+    143.63932300057058,
+    143.42608200058748,
+    143.50112300053297,
+    143.40442499997152,
+    145.622017000278,
+    143.27041799970175,
+    143.0491430000984
+  ],
+  "last_logits_sum": -151061.375
+}

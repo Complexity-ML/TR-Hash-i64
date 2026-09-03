@@ -21,7 +21,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tr_hash_i64.models.complexity_deep.config import ComplexityDeepConfig
 from tr_hash_i64.models.complexity_deep.model import ComplexityDeepModel
-from tr_hash_i64.core.loader import load_checkpoint, _get_module_for_param
+from tr_hash_i64.core.loader import (
+    load_checkpoint,
+    _fuse_projection_layers,
+    _get_module_for_param,
+    _projection_fusion_allowed,
+)
 from tr_hash_i64.parallel.tensor_parallel import ColumnParallelLinear, RowParallelLinear
 
 
@@ -156,6 +161,50 @@ class TestGetModuleForParam:
         model = ComplexityDeepModel(config)
         module = _get_module_for_param(model, "nonexistent.layer.weight")
         assert module is None
+
+
+class TestProjectionFusion:
+    @pytest.mark.parametrize("quantization", ["awq", "gptq"])
+    def test_excludes_prequantized_formats(self, quantization):
+        assert not _projection_fusion_allowed("cpu", quantization)
+        assert not _projection_fusion_allowed("cuda", quantization)
+
+    @pytest.mark.parametrize("quantization", [None, "none"])
+    def test_allows_unquantized_accelerator_formats(self, quantization):
+        assert _projection_fusion_allowed("cuda", quantization)
+        assert _projection_fusion_allowed("mps", quantization)
+
+    @pytest.mark.parametrize("quantization", ["int8", "int4", "fp8"])
+    def test_leaves_accelerator_post_quantization_layout_unfused(self, quantization):
+        assert not _projection_fusion_allowed("cuda", quantization)
+
+    @pytest.mark.parametrize("quantization", [None, "none", "int8", "int4"])
+    def test_preserves_cpu_fusion_behavior(self, quantization):
+        assert _projection_fusion_allowed("cpu", quantization)
+
+    def test_preserves_model_output(self):
+        config = ComplexityDeepConfig(
+            hidden_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=2,
+            intermediate_size=128,
+            num_experts=2,
+            vocab_size=32,
+            max_position_embeddings=32,
+            top_k=2,
+        )
+        model = ComplexityDeepModel(config).eval()
+        token_ids = torch.tensor([2, 7, 11, 19])
+        positions = torch.arange(token_ids.numel())
+
+        with torch.inference_mode():
+            expected = model(token_ids, positions, tokens_per_seq=[4])
+            fused_count = _fuse_projection_layers(model)
+            actual = model(token_ids, positions, tokens_per_seq=[4])
+
+        assert fused_count == 3
+        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
 
 
 class TestLoadCheckpoint:

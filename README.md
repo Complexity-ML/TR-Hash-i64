@@ -75,7 +75,22 @@ tr-hash-i64 serve tr-moe-306 \
 
 The CPU engine includes continuous batching, a paged KV cache, prefix caching,
 request streaming and queue backpressure. The same command automatically uses
-CUDA when a GPU is available.
+CUDA when a GPU is available. During prefill it projects only the final hidden
+row required for sampling instead of materializing logits for every prompt
+token. Reproduce the checkpoint-level CPU measurement with:
+
+```bash
+python benchmarks/bench_cpu_prefill.py \
+  --model-dir /path/to/TR-HASH-MoE-200M-160B-SFT \
+  --model-id AETHORIA-AI/TR-HASH-MoE-200M-160B-SFT \
+  --quantization int8 --prompt-len 128 --repeats 9 \
+  --output cpu-prefill.json
+```
+
+On the released 200M SFT checkpoint with dynamic INT8, 8 CPU threads and a
+128-token prompt, the median production prefill fell from 158.799 ms to
+143.404 ms (9.69% lower latency) with an identical final-logit sum.
+The protocol and raw trials are recorded under `benchmarks/results/`.
 
 ## Supervised production service
 

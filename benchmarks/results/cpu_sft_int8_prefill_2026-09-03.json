@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "benchmark": "benchmarks/bench_cpu_prefill.py",
+  "date": "2026-09-03",
+  "host": "tr-hash-server",
+  "model": {
+    "id": "AETHORIA-AI/TR-HASH-MoE-200M-160B-SFT",
+    "checkpoint_manifest_sha256": "fb66baf5bb567eb5a73ce7e53b5d351a0963356808d41af904d776d50428e327"
+  },
+  "runtime": {
+    "device": "cpu",
+    "quantization": "int8",
+    "threads": 8,
+    "prompt_len": 128,
+    "warmup_runs": 2,
+    "measured_runs": 9
+  },
+  "baseline": {
+    "result_file": "raw/cpu_sft_int8_production_before.json",
+    "commit": "61d73a42c9d45da0f995d96c4dcfb2a17c09e824",
+    "supports_logits_indices": false,
+    "model_file_sha256": "d2190787d0c1dbcca32e24999cdf66ae59c3f4c0de021e3c82e24bfddbc23d73",
+    "token_routed_mlp_file_sha256": "74271db5c0c25e29d7e8195ab4f14e5c9d88dc9fe0cb8bc6e9aef5544a43a0f0",
+    "median_ms": 158.79883300021902,
+    "trials_ms": [
+      158.37704100022165,
+      158.56215999974665,
+      159.00164399999994,
+      158.79883300021902,
+      158.79730200003905,
+      158.94211200020436,
+      158.74108999969394,
+      159.05313200028104,
+      159.00241999997888
+    ],
+    "last_logits_sum": -151061.375
+  },
+  "optimized": {
+    "result_file": "raw/cpu_sft_int8_production_rebased_after.json",
+    "supports_logits_indices": true,
+    "model_file_sha256": "9637c9b3ef641eb0f673048b552ab5ad9b383d2ab1c023c506c2a02dcd8f5a3c",
+    "token_routed_mlp_file_sha256": "ec9c003ab1ca54c0bbea087003c6a613c4109fabf010d68bc7c4cb5bd3874725",
+    "median_ms": 143.40442499997152,
+    "trials_ms": [
+      143.20722599950386,
+      143.1050179999147,
+      143.63932300057058,
+      143.42608200058748,
+      143.50112300053297,
+      143.40442499997152,
+      145.622017000278,
+      143.27041799970175,
+      143.0491430000984
+    ],
+    "last_logits_sum": -151061.375
+  },
+  "result": {
+    "latency_reduction_percent": 9.694282829034558,
+    "throughput_gain_percent": 10.734960235885715,
+    "speedup": 1.1073496023588572,
+    "last_logits_sum_equal": true,
+    "note": "Dynamic INT8 keeps independent top-k route dispatch because combining routes changes activation quantization scales. The measured production gain comes from selective final-row LM-head projection."
+  }
+}

@@ -16,6 +16,7 @@ from tr_hash_i64.core.tokenizer import I64Tokenizer
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-dir", required=True)
+    parser.add_argument("--model-id", required=True)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--max-length", type=int, default=2048)
     parser.add_argument("--limit", type=int, default=0)
@@ -56,7 +57,7 @@ def encode_choices(tokenizer, rows, max_length):
 @torch.inference_mode()
 def main():
     args = parse_args()
-    rows = load_piqa_validation(Path("/workspace/datasets/piqa"))
+    rows = load_piqa_validation(Path.home() / ".cache" / "tr_hash_i64" / "piqa")
     if args.limit > 0:
         rows = rows[: args.limit]
 
@@ -144,7 +145,7 @@ def main():
         ) == label
 
     result = {
-        "model": "AETHORIA-AI/TR-HASH-200M-130B",
+        "model": args.model_id,
         "dataset": "ybisk/piqa",
         "split": "validation",
         "protocol": "causal_choice_loglikelihood_teacher_forcing",
