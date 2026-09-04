@@ -53,7 +53,7 @@ class ComplexityDeepConfig:
     use_token_routed_mlp: bool = True
     num_experts: int = 4
     shared_expert: bool = True
-    shared_intermediate_size: Optional[int] = None  # None = expert_intermediate_size
+    shared_intermediate_size: Optional[int] = None  # None = intermediate_size
     top_k: int = 1
     top_k_primary_weight: Optional[float] = None
     use_shared_routed_gates: bool = False

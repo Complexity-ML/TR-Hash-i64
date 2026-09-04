@@ -345,12 +345,18 @@ class TestLoadCheckpoint:
         expert_gate = torch.randn(config.num_experts, config.hidden_size, expert_inter)
         expert_up = torch.randn(config.num_experts, config.hidden_size, expert_inter)
         expert_down = torch.randn(config.num_experts, expert_inter, config.hidden_size)
+        shared_gate = torch.randn(config.intermediate_size, config.hidden_size)
+        shared_up = torch.randn(config.intermediate_size, config.hidden_size)
+        shared_down = torch.randn(config.hidden_size, config.intermediate_size)
 
         state_dict = {
             "layers.0.mlp.engine.expert_gate": expert_gate,
             "layers.0.mlp.engine.expert_up": expert_up,
             "layers.0.mlp.engine.expert_down": expert_down,
             "layers.0.mlp.engine.route_table": route_table,
+            "layers.0.mlp.engine.shared_gate.weight": shared_gate,
+            "layers.0.mlp.engine.shared_up.weight": shared_up,
+            "layers.0.mlp.engine.shared_down.weight": shared_down,
             # Cache-only artifacts -- must be dropped, not loaded anywhere.
             "layers.0.mlp.engine.fused_route_codes": torch.zeros(config.vocab_size, dtype=torch.uint8),
             "layers.0.mlp.engine.fused_expert_pairs": torch.zeros(6, 2, dtype=torch.int32),
@@ -366,6 +372,9 @@ class TestLoadCheckpoint:
             assert torch.equal(mlp.gate_proj_w.data, expert_gate)
             assert torch.equal(mlp.up_proj_w.data, expert_up)
             assert torch.equal(mlp.down_proj_w.data, expert_down)
+            assert torch.equal(mlp.shared_gate.weight.data, shared_gate)
+            assert torch.equal(mlp.shared_up.weight.data, shared_up)
+            assert torch.equal(mlp.shared_down.weight.data, shared_down)
             assert torch.equal(mlp.topk_token_to_expert, route_table)
             assert torch.equal(mlp.token_to_expert, route_table[0])
             assert not any(

@@ -81,7 +81,7 @@ class TokenRoutedMLP(nn.Module):
         self.use_shared_expert = shared_expert
         self.use_shared_routed_gates = bool(use_shared_routed_gates)
         if shared_expert:
-            shared_size = shared_intermediate_size if shared_intermediate_size > 0 else self.full_expert_inter
+            shared_size = shared_intermediate_size if shared_intermediate_size > 0 else intermediate_size
             self.shared_gate = nn.Linear(hidden_size, shared_size, bias=False)
             self.shared_up = nn.Linear(hidden_size, shared_size, bias=False)
             self.shared_down = nn.Linear(shared_size, hidden_size, bias=False)
