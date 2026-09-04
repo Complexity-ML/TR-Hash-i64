@@ -9,7 +9,7 @@ Complexity-ML - 2026
 
 import json
 from typing import Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 
 @dataclass
@@ -88,12 +88,13 @@ class ComplexityDeepConfig:
         field_map = {
             "norm_eps": "rms_norm_eps",
         }
+        configurable_fields = {field.name for field in fields(config)}
 
         for key, val in data.items():
             if key in ("parameters", "innovations", "extra_config"):
                 continue
             mapped_key = field_map.get(key, key)
-            if hasattr(config, mapped_key):
+            if mapped_key in configurable_fields:
                 setattr(config, mapped_key, val)
 
         # Framework format: detect token-routed from mlp_type

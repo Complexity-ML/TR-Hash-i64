@@ -4,7 +4,7 @@
 [![Python 3.10–3.12](https://img.shields.io/badge/python-3.10%E2%80%933.12-blue.svg)](https://www.python.org/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](pyproject.toml)
 
-An independent inference engine and OpenAI-compatible server for Complexity-ML's deterministic token-routed language models. For the current SFT release, TR-Hash-i64 loads the complete persisted top-k routing tables verbatim and serves the model on CUDA, Apple MPS, or CPU.
+An independent inference engine and OpenAI-compatible server for Complexity-ML's deterministic token-routed language models. For the public SFT releases, TR-Hash-i64 loads the complete persisted top-k routing tables verbatim and serves the models on CUDA, Apple MPS, or CPU.
 
 > TR-Hash-i64 is not a vLLM fork and is not affiliated with the vLLM project.
 
@@ -32,6 +32,7 @@ Training and checkpoint creation remain outside this repository. This project is
 
 | CLI name | Checkpoint | Parameters | Role |
 | --- | --- | ---: | --- |
+| `tr-hash-moe-100m-agentic-sft` | [`AETHORIA-AI/TR-HASH-MoE-100M-70B-Agentic-SFT`](https://huggingface.co/AETHORIA-AI/TR-HASH-MoE-100M-70B-Agentic-SFT) | 100.4M | Agentic SFT assistant |
 | `tr-hash-moe-200m` | [`AETHORIA-AI/TR-HASH-MoE-200M-160B-SFT`](https://huggingface.co/AETHORIA-AI/TR-HASH-MoE-200M-160B-SFT) | 201.2M | Current public SFT assistant |
 | `tr-hash-moe-500m` | [`Pacific-i64/TR-HASH-MOE-500M-HF`](https://huggingface.co/Pacific-i64/TR-HASH-MOE-500M-HF) | 492.1M | Earlier research release |
 | `tr-moe-306` | [`Pacific-i64/TR-MOE-306`](https://huggingface.co/Pacific-i64/TR-MOE-306) | 306.5M | Routed comparison checkpoint |

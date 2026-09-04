@@ -86,6 +86,23 @@ class TestComplexityDeepConfig:
         finally:
             os.unlink(path)
 
+    def test_from_json_ignores_derived_head_dim(self):
+        data = {
+            "hidden_size": 640,
+            "num_attention_heads": 10,
+            "head_dim": 64,
+            "architectures": ["TRHashForCausalLM"],
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(data, f)
+            path = f.name
+
+        try:
+            config = ComplexityDeepConfig.from_json(path)
+            assert config.head_dim == 64
+        finally:
+            os.unlink(path)
+
     def test_top2_and_output_gates_from_json(self):
         data = {
             "mlp_type": "token_routed",
@@ -120,11 +137,20 @@ class TestPublicRegistry:
         from tr_hash_i64.core.registry import list_models
 
         assert [item["name"] for item in list_models()] == [
+            "tr-hash-moe-100m-agentic-sft",
             "tr-hash-moe-500m",
             "tr-hash-moe-200m",
             "tr-moe-306",
             "dense-306",
         ]
+
+    def test_tr_hash_100m_agentic_registry_entry(self):
+        from tr_hash_i64.core.registry import get_model_entry
+
+        entry = get_model_entry("tr-hash-moe-100m-agentic-sft")
+        assert entry.checkpoint == "AETHORIA-AI/TR-HASH-MoE-100M-70B-Agentic-SFT"
+        assert entry.parameters == "100.4M"
+        assert "Agentic SFT" in entry.description
 
     def test_tr_hash_500m_registry_entry(self):
         from tr_hash_i64.core.registry import get_model_entry

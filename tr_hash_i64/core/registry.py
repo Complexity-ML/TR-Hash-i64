@@ -31,6 +31,7 @@ _COMPLEXITY_DEEP = (
 
 _ARCHITECTURE_MAP: Dict[str, Tuple[str, str]] = {
     "DeepForCausalLM": _COMPLEXITY_DEEP,
+    "TRHashForCausalLM": _COMPLEXITY_DEEP,
 }
 
 
@@ -109,6 +110,15 @@ def resolve_architecture(
             return resolved[0], resolved[1], str(config_path)
     return None
 
+
+register_model(
+    name="tr-hash-moe-100m-agentic-sft",
+    model_class=_COMPLEXITY_DEEP[0],
+    config_loader=_COMPLEXITY_DEEP[1],
+    checkpoint="AETHORIA-AI/TR-HASH-MoE-100M-70B-Agentic-SFT",
+    parameters="100.4M",
+    description="Released 32K Agentic SFT with deterministic multi-hash routing",
+)
 
 register_model(
     name="tr-hash-moe-500m",
