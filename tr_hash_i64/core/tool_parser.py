@@ -5,8 +5,9 @@ Parses function calls from model-generated text.
 Supports OpenAI-compatible tool_calls format.
 
 Extraction strategies:
-  1. JSON object with "name" and "arguments" fields
+  1. Native Agentic <|tool_call_start|>...<|tool_call_end|> tags
   2. <tool_call> XML-style tags (common in fine-tuned models)
+  3. JSON object with "name" and "arguments" fields
 """
 
 import json
@@ -30,9 +31,9 @@ class ToolCallParser:
     Parse tool/function calls from generated text.
 
     Tries multiple extraction patterns:
-      1. JSON: {"name": "func", "arguments": {...}}
+      1. Native Agentic tags: <|tool_call_start|>{...}<|tool_call_end|>
       2. XML tags: <tool_call>{"name": "func", ...}</tool_call>
-      3. Function call syntax: func_name(arg1, arg2)
+      3. JSON: {"name": "func", "arguments": {...}}
     """
 
     def __init__(self, tools: List[Dict]):
@@ -50,7 +51,22 @@ class ToolCallParser:
         """
         calls = []
 
-        # Strategy 1: <tool_call>...</tool_call> tags
+        # Strategy 1: native Agentic tool-call delimiters. The Agentic SFT
+        # emits arguments before name, so parse JSON rather than relying on
+        # field order.
+        native_pattern = re.compile(
+            r'<\|tool_call_start\|>\s*(.*?)\s*<\|tool_call_end\|>',
+            re.DOTALL,
+        )
+        for match in native_pattern.finditer(text):
+            call = self._parse_json_call(match.group(1))
+            if call:
+                calls.append(call)
+
+        if calls:
+            return calls
+
+        # Strategy 2: <tool_call>...</tool_call> tags
         tag_pattern = re.compile(r'<tool_call>\s*(.*?)\s*</tool_call>', re.DOTALL)
         for match in tag_pattern.finditer(text):
             call = self._parse_json_call(match.group(1))
@@ -60,12 +76,23 @@ class ToolCallParser:
         if calls:
             return calls
 
-        # Strategy 2: JSON objects with "name" and "arguments"
-        json_pattern = re.compile(r'\{[^{}]*"name"\s*:\s*"[^"]*"[^{}]*"arguments"\s*:\s*\{[^}]*\}[^{}]*\}', re.DOTALL)
-        for match in json_pattern.finditer(text):
-            call = self._parse_json_call(match.group(0))
+        # Strategy 3: bare JSON objects. JSONDecoder handles nested arguments
+        # and accepts either field order.
+        decoder = json.JSONDecoder()
+        position = 0
+        while True:
+            start = text.find("{", position)
+            if start < 0:
+                break
+            try:
+                data, consumed = decoder.raw_decode(text[start:])
+            except json.JSONDecodeError:
+                position = start + 1
+                continue
+            call = self._tool_call_from_data(data)
             if call:
                 calls.append(call)
+            position = start + consumed
 
         return calls if calls else None
 
@@ -74,6 +101,13 @@ class ToolCallParser:
         try:
             data = json.loads(text)
         except json.JSONDecodeError:
+            return None
+
+        return self._tool_call_from_data(data)
+
+    def _tool_call_from_data(self, data: object) -> Optional[ToolCall]:
+        """Validate decoded JSON and convert it to a tool call."""
+        if not isinstance(data, dict):
             return None
 
         name = data.get("name", "")

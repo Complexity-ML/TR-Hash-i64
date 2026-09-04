@@ -586,6 +586,17 @@ class TestToolParser:
                 "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "calculator",
+                "description": "Evaluate arithmetic",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"expression": {"type": "string"}},
+                },
+            },
+        },
     ]
 
     def test_parse_json_tool_call(self):
@@ -605,6 +616,25 @@ class TestToolParser:
         assert calls is not None
         assert len(calls) == 1
         assert calls[0].function_name == "search"
+
+    def test_parse_native_agentic_tool_call(self):
+        parser = ToolCallParser(self.TOOLS)
+        text = (
+            '<|tool_call_start|>{"arguments":{"expression":"927 * 43"},'
+            '"name":"calculator"}<|tool_call_end|>'
+        )
+        calls = parser.parse(text)
+        assert calls is not None
+        assert len(calls) == 1
+        assert calls[0].function_name == "calculator"
+        assert json.loads(calls[0].function_arguments) == {"expression": "927 * 43"}
+
+    def test_parse_bare_json_with_arguments_before_name(self):
+        parser = ToolCallParser(self.TOOLS)
+        text = '{"arguments":{"expression":"2 + (3 * 4)"},"name":"calculator"}'
+        calls = parser.parse(text)
+        assert calls is not None
+        assert calls[0].function_name == "calculator"
 
     def test_parse_multiple_xml_calls(self):
         parser = ToolCallParser(self.TOOLS)
@@ -679,4 +709,5 @@ class TestToolParser:
         parser = ToolCallParser(self.TOOLS)
         assert "get_weather" in parser.function_names
         assert "search" in parser.function_names
-        assert len(parser.function_names) == 2
+        assert "calculator" in parser.function_names
+        assert len(parser.function_names) == 3
