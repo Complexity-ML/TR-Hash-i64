@@ -134,10 +134,10 @@ def test_stream_decoder_waits_for_complete_utf8_character():
 
 class _NativeEnvelopeTokenizer:
     _markers = {
-        "<|think_start|>": 32_000,
-        "<|think_end|>": 32_001,
-        "<|final_start|>": 32_002,
-        "<|final_end|>": 32_003,
+        "<|think_start|>": 16,
+        "<|think_end|>": 17,
+        "<|final_start|>": 18,
+        "<|final_end|>": 19,
     }
     _text = {10: "reason", 11: "answer"}
 
@@ -162,12 +162,12 @@ def test_chat_decoder_preserves_only_native_reasoning_markers():
         tokenizer=_NativeEnvelopeTokenizer(),
     )
 
-    decoded = server._detokenize_chat([32_000, 10, 32_001, 32_002, 11, 32_003])
+    decoded = server._detokenize_chat([16, 10, 17, 18, 11, 19])
 
     assert decoded == (
         "<|think_start|>reason<|think_end|><|final_start|>answer<|final_end|>"
     )
-    assert server._chat_stop_token_ids() == [32_003]
+    assert server._chat_stop_token_ids() == [19]
 
 
 def test_chat_stream_decoder_emits_native_markers_atomically():
@@ -176,11 +176,11 @@ def test_chat_stream_decoder_emits_native_markers_atomically():
         tokenizer=_NativeEnvelopeTokenizer(),
     )
 
-    delta, emitted = server._stream_chat_text_delta([32_000], "")
+    delta, emitted = server._stream_chat_text_delta([16], "")
     assert delta == "<|think_start|>"
     assert emitted == "<|think_start|>"
 
-    delta, emitted = server._stream_chat_text_delta([32_000, 10], emitted)
+    delta, emitted = server._stream_chat_text_delta([16, 10], emitted)
     assert delta == "reason"
     assert emitted == "<|think_start|>reason"
 

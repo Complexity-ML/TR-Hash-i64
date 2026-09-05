@@ -26,12 +26,12 @@ logger = get_logger("tr_hash_i64.server")
 class HelpersMixin:
     """Shared helpers: tokenization, chat template, image pre-processing, response building."""
 
-    _NATIVE_CHAT_MARKERS = {
-        "<|think_start|>": 32_000,
-        "<|think_end|>": 32_001,
-        "<|final_start|>": 32_002,
-        "<|final_end|>": 32_003,
-    }
+    _NATIVE_CHAT_MARKERS = (
+        "<|think_start|>",
+        "<|think_end|>",
+        "<|final_start|>",
+        "<|final_end|>",
+    )
 
     # ------------------------------------------------------------------
     # Request ID
@@ -81,9 +81,9 @@ class HelpersMixin:
             return {}
 
         markers: Dict[int, str] = {}
-        for token, expected_id in self._NATIVE_CHAT_MARKERS.items():
+        for token in self._NATIVE_CHAT_MARKERS:
             token_id = token_to_id(token)
-            if token_id is not None and int(token_id) == expected_id:
+            if token_id is not None:
                 markers[int(token_id)] = token
         return markers
 
@@ -96,10 +96,10 @@ class HelpersMixin:
         ]
 
     def _detokenize_chat(self, token_ids: List[int]) -> str:
-        """Decode chat text while preserving native 32,004 envelope markers.
+        """Decode chat text while preserving registered envelope markers.
 
         All other registered special tokens remain hidden. Segment-wise
-        decoding avoids exposing BOS/EOS/PAD while keeping the four SFT-v2
+        decoding avoids exposing BOS/EOS/PAD while keeping the four chat
         control tokens available to the UI parser.
         """
         markers = self._native_chat_marker_ids()
@@ -185,7 +185,8 @@ class HelpersMixin:
                     continue
                 try:
                     if url.startswith("data:"):
-                        import base64, io
+                        import base64
+                        import io
                         from PIL import Image
                         _, b64_data = url.split(",", 1)
                         image = Image.open(io.BytesIO(base64.b64decode(b64_data))).convert("RGB")
