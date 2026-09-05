@@ -69,6 +69,8 @@ from tr_hash_i64.api._agent import AgentMixin
 
 logger = get_logger("tr_hash_i64.server")
 
+DEFAULT_LANDING_URL = "https://www.complexity-ai.fr/ai-lab"
+
 
 class I64Server(HelpersMixin, CompletionsMixin, AdminMixin, RAGMixin, AgentMixin):
     """
@@ -99,6 +101,7 @@ class I64Server(HelpersMixin, CompletionsMixin, AdminMixin, RAGMixin, AgentMixin
         sandbox_timeout: int = 30,
         sandbox_max_memory_mb: int = 256,
         sandbox_user: Optional[str] = None,
+        landing_url: str = DEFAULT_LANDING_URL,
     ):
         # ── Engine ──────────────────────────────────────────────────────
         if engine is None:
@@ -137,6 +140,7 @@ class I64Server(HelpersMixin, CompletionsMixin, AdminMixin, RAGMixin, AgentMixin
         self._rate_limiter = TokenBucketRateLimiter(rate_limit) if rate_limit > 0 else None
         self._max_pending = max_pending
         self.context_compact_tokens = context_compact_tokens
+        self.landing_url = landing_url
         self._start_time = time.monotonic()
         self._shutting_down = False
         self._ready = False
@@ -270,7 +274,7 @@ class I64Server(HelpersMixin, CompletionsMixin, AdminMixin, RAGMixin, AgentMixin
         return app
 
     async def handle_root(self, request: web.Request) -> web.Response:
-        raise web.HTTPFound("https://www.complexity-ai.fr/demo")
+        raise web.HTTPFound(self.landing_url)
 
     async def _handle_options(self, request: web.Request) -> web.Response:
         return web.Response()

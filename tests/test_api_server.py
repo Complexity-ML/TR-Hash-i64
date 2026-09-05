@@ -22,6 +22,8 @@ import json
 import sys
 import os
 
+from aiohttp import web
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from aiohttp.test_utils import TestClient, TestServer
@@ -101,6 +103,21 @@ async def rate_client(rate_limited_server):
     app = rate_limited_server.create_app()
     async with TestClient(TestServer(app)) as c:
         yield c
+
+
+@pytest.mark.asyncio
+async def test_root_redirect_uses_configured_landing_url(engine):
+    landing_url = "https://www.complexity-ai.fr/ai-lab?model=v2"
+    redirect_server = I64Server(
+        engine=engine,
+        tokenizer=None,
+        landing_url=landing_url,
+    )
+
+    with pytest.raises(web.HTTPFound) as caught:
+        await redirect_server.handle_root(None)
+
+    assert caught.value.location == landing_url
 
 
 def test_stream_decoder_waits_for_complete_utf8_character():

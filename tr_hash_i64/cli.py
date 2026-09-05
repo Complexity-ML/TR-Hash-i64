@@ -81,6 +81,8 @@ def cmd_serve(args):
             sandbox_timeout=getattr(args, 'sandbox_timeout', 30),
             sandbox_max_memory_mb=getattr(args, 'sandbox_memory', 256),
             sandbox_user=getattr(args, 'sandbox_user', None),
+            landing_url=getattr(args, 'landing_url', None)
+            or "https://www.complexity-ai.fr/ai-lab",
         )
         server.run()
         return
@@ -105,6 +107,8 @@ def cmd_serve(args):
                 forward_args += ["--checkpoint", args.checkpoint]
             if args.chat_template:
                 forward_args += ["--chat-template", args.chat_template]
+            if args.landing_url:
+                forward_args += ["--landing-url", args.landing_url]
             if args.quantization and args.quantization != "none":
                 forward_args += ["--quantization", args.quantization]
             if args.context_compact_tokens is not None:
@@ -141,6 +145,8 @@ def cmd_serve(args):
             forward_args += ["--checkpoint", args.checkpoint]
         if args.chat_template:
             forward_args += ["--chat-template", args.chat_template]
+        if args.landing_url:
+            forward_args += ["--landing-url", args.landing_url]
         if args.quantization and args.quantization != "none":
             forward_args += ["--quantization", args.quantization]
         if args.context_compact_tokens is not None:
@@ -309,6 +315,8 @@ def cmd_serve(args):
         sandbox_timeout=getattr(args, 'sandbox_timeout', 30),
         sandbox_max_memory_mb=getattr(args, 'sandbox_memory', 256),
         sandbox_user=getattr(args, 'sandbox_user', None),
+        landing_url=getattr(args, 'landing_url', None)
+        or "https://www.complexity-ai.fr/ai-lab",
     )
     server.run()
 
@@ -861,6 +869,11 @@ def main():
                               "awq/gptq for pre-quantized HF checkpoints)")
     p_serve.add_argument("--checkpoint", default=None, help="Override checkpoint path")
     p_serve.add_argument("--chat-template", default=None, help="Path to chat template")
+    p_serve.add_argument(
+        "--landing-url",
+        default="https://www.complexity-ai.fr/ai-lab",
+        help="Browser destination for GET /",
+    )
     p_serve.add_argument("--enable-prefix-caching", action="store_true", default=True,
                          help="Enable prefix caching for KV cache reuse (default: enabled)")
     p_serve.add_argument("--no-prefix-caching", action="store_true",
