@@ -705,6 +705,63 @@ async def test_chat_stream_exposes_context_metrics(client):
 
 
 @pytest.mark.asyncio
+async def test_chat_stream_emits_structured_tool_calls(client, server, monkeypatch):
+    generated = (
+        "<|think_start|>Use the calculator.<|think_end|>"
+        '<|tool_call_start|>{"arguments":{"expression":"927*43"},'
+        '"name":"calculator"}<|tool_call_end|>'
+    )
+
+    async def generate_stream(**_kwargs):
+        for token_id in generated.encode("utf-8"):
+            yield token_id
+        yield ("__done__", "length")
+
+    monkeypatch.setattr(server.async_engine, "generate_stream", generate_stream)
+
+    resp = await client.post(
+        "/v1/chat/completions",
+        json={
+            "messages": [{"role": "user", "content": "What is 927 * 43?"}],
+            "max_tokens": 256,
+            "stream": True,
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "calculator",
+                        "description": "Evaluate arithmetic.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"expression": {"type": "string"}},
+                            "required": ["expression"],
+                            "additionalProperties": False,
+                        },
+                    },
+                }
+            ],
+            "tool_choice": "required",
+        },
+    )
+
+    assert resp.status == 200
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in (await resp.read()).decode("utf-8").splitlines()
+        if line.startswith("data: {")
+    ]
+    tool_event = next(
+        event for event in events if event["choices"][0]["delta"].get("tool_calls")
+    )
+    tool_call = tool_event["choices"][0]["delta"]["tool_calls"][0]
+    assert tool_call["index"] == 0
+    assert tool_call["type"] == "function"
+    assert tool_call["function"]["name"] == "calculator"
+    assert json.loads(tool_call["function"]["arguments"]) == {"expression": "927*43"}
+    assert events[-1]["choices"][0]["finish_reason"] == "tool_calls"
+
+
+@pytest.mark.asyncio
 async def test_chat_response_restores_seeded_native_thinking_prefill(client, server):
     server.chat_template = (
         "{% for message in messages %}"

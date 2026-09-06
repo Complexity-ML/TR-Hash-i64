@@ -299,10 +299,12 @@ class CompletionsMixin:
             yield f"data: {json.dumps({'id': stream_id, 'object': 'chat.completion.chunk', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'content': token_text}, 'finish_reason': None}]})}\n\n"
 
         response_prefill = getattr(request, "_chat_response_prefill", "")
+        generated_text = response_prefill + prev_text
         reasoning_contract = self._chat_reasoning_contract(response_prefill)
         if reasoning_contract and reasoning_contract[0] not in prev_text:
             _, transition, closing = reasoning_contract
             yield f"data: {json.dumps({'id': stream_id, 'object': 'chat.completion.chunk', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'content': transition}, 'finish_reason': None}]})}\n\n"
+            generated_text += transition
 
             transition_ids = await self._tokenize_async(transition)
             total_budget = getattr(
@@ -348,8 +350,19 @@ class CompletionsMixin:
                     if token_text:
                         yield f"data: {json.dumps({'id': stream_id, 'object': 'chat.completion.chunk', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'content': token_text}, 'finish_reason': None}]})}\n\n"
 
+                    generated_text += final_text
+
             if closing not in final_text:
                 yield f"data: {json.dumps({'id': stream_id, 'object': 'chat.completion.chunk', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'content': closing}, 'finish_reason': None}]})}\n\n"
+                generated_text += closing
+
+        if tools:
+            from tr_hash_i64.core.tool_parser import ToolCallParser
+
+            tool_calls = ToolCallParser(tools).parse(generated_text)
+            if tool_calls:
+                yield f"data: {json.dumps({'id': stream_id, 'object': 'chat.completion.chunk', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {'tool_calls': [{'index': index, 'id': tc.id, 'type': tc.type, 'function': {'name': tc.function_name, 'arguments': tc.function_arguments}} for index, tc in enumerate(tool_calls)]}, 'finish_reason': None}]})}\n\n"
+                finish_reason = "tool_calls"
 
         yield f"data: {json.dumps({'id': stream_id, 'object': 'chat.completion.chunk', 'created': created, 'model': self.model_name, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': finish_reason}]})}\n\n"
         yield "data: [DONE]\n\n"
