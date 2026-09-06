@@ -25,6 +25,35 @@ class CompletionsMixin:
     _NATIVE_THINK_FINAL_TRANSITION = "<|think_end|><|final_start|>"
     _NATIVE_THINK_FINAL_CLOSING = "<|final_end|>"
 
+    @staticmethod
+    def _tool_system_message(tools: object) -> dict | None:
+        """Serialize OpenAI tools into the compact native training contract."""
+
+        if not isinstance(tools, list):
+            return None
+        canonical = []
+        for tool in tools:
+            if not isinstance(tool, dict) or tool.get("type") != "function":
+                continue
+            function = tool.get("function")
+            if not isinstance(function, dict) or not isinstance(
+                function.get("name"), str
+            ):
+                continue
+            definition = {
+                key: function[key]
+                for key in ("description", "name", "parameters")
+                if key in function
+            }
+            canonical.append({"function": definition, "type": "function"})
+        if not canonical:
+            return None
+        return {
+            "role": "system",
+            "content": "Available tools:\n"
+            + json.dumps(canonical, ensure_ascii=False, separators=(",", ":")),
+        }
+
     @classmethod
     def _chat_response_prefill(cls, prompt: str) -> str:
         """Restore a generation prefill in the assistant API content.
@@ -476,6 +505,9 @@ class CompletionsMixin:
             pixel_values = self._preprocess_images(images)
 
         context_messages = list(messages)
+        tool_system_message = self._tool_system_message(body.get("tools"))
+        if tool_system_message is not None:
+            context_messages = [tool_system_message, *context_messages]
         if body.get("rag") and self.rag_enabled and self.retriever is not None:
             user_query = messages[-1].get("content", "")
             if isinstance(user_query, list):
